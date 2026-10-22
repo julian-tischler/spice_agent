@@ -145,5 +145,7 @@ Everything under `out/` is produced by a run and is git-ignored:
   is measured and reported, but no spec field requires it — the prompt asks for
   unity gain and nothing enforces it.
 - **Parasitic values are representative, not measured.** Inductor winding
-  capacitance is the load-bearing figure and the least certain one;
-  `profile.inductor_srf_hz(L)` exists to check it against a real datasheet.
+  capacitance is the load-bearing figure and the least certain one, with Q at
+  self-resonance a close second; `profile.inductor_srf_hz(L)` exists to check
+  the first against a real datasheet, and `inductor_rp(L)` is directly the
+  height of the resonant impedance peak.

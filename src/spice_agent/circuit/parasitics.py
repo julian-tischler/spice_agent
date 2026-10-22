@@ -31,6 +31,9 @@ SOURCES AND CONFIDENCE
   inductor winding capacitance  LOW confidence. Varies hugely with winding
                                 style; 5-30 pF is the usual range quoted
                                 for mH-class leaded chokes. ANCHOR THIS.
+  inductor Q at self-resonance  LOW confidence. Filter inductors run
+                                Q = 20-80 there; the value only changes how
+                                sharp the resonant peak is, not where it is.
   inductor DCR                  MEDIUM. Scales with turns, so roughly with
                                 sqrt(L) within one family.
   MLCC ESL                      HIGH. 0.5-0.9 nH for 0603 is a standard
@@ -74,6 +77,16 @@ class TechnologyProfile:
     # DCR is modelled as k * sqrt(L), since turns -- and so wire length --
     # grow roughly with sqrt(L) for a fixed core and gauge.
     inductor_dcr_per_sqrt_h: float = 0.0
+    # Quality factor at self-resonance, which sets the parallel loss
+    # resistance R_p = Q * sqrt(L/Cp). Stored as a dimensionless Q rather
+    # than a resistance because the right R_p scales with the part:
+    # sqrt(L/Cp) is 25.8 kohm at 10 mH but only 4.6 kohm at 318 uH.
+    #
+    # Without it the resonance is damped by DCR alone, which gives Q ~ 860
+    # for a 10 mH part and so an unphysically sharp, deep notch at SRF.
+    # Real filter inductors sit around Q = 20-80 there; a deliberately
+    # lossy part such as a ferrite bead is nearer Q = 1.
+    inductor_q_at_srf: float = 0.0
 
     # -- capacitor ----------------------------------------------------
     capacitor_esl: float = 0.0
@@ -112,6 +125,23 @@ class TechnologyProfile:
     def inductor_dcr(self, inductance_h: float) -> float:
         """Series resistance of an inductor of this value."""
         return self.inductor_dcr_per_sqrt_h * math.sqrt(max(inductance_h, 0.0))
+
+    def inductor_rp(self, inductance_h: float) -> float:
+        """
+        Parallel loss resistance standing in for core and dielectric loss.
+
+        R_p = Q * sqrt(L/Cp) is the impedance the tank presents AT
+        resonance, so this value is directly the height of the self-resonant
+        impedance peak - set R_p to 500 kohm and the peak measures 497 kohm.
+
+        Returns 0.0 when there is no winding capacitance: no tank, so
+        nothing to damp. Does not affect the SRF itself, only its sharpness.
+        """
+        if (self.inductor_q_at_srf <= 0 or self.inductor_winding_c <= 0
+                or inductance_h <= 0):
+            return 0.0
+        return self.inductor_q_at_srf * math.sqrt(
+            inductance_h / self.inductor_winding_c)
 
     def inductor_srf_hz(self, inductance_h: float) -> float | None:
         """
@@ -185,6 +215,7 @@ SMD_PCB = TechnologyProfile(
     # Small SMD ferrite/wirewound chokes wind fewer turns than leaded ones.
     inductor_winding_c=3e-12,
     inductor_dcr_per_sqrt_h=300.0,      # ~9.5 ohm at 1 mH, ~30 ohm at 10 mH
+    inductor_q_at_srf=20.0,             # decent ferrite/wirewound SMD part
     capacitor_esl=0.8e-9,               # 0603 MLCC, vendor app-note figure
     capacitor_esr=0.02,
     resistor_series_l=0.4e-9,
@@ -205,6 +236,7 @@ BREADBOARD = TechnologyProfile(
     # Leaded mH-class chokes: more turns, so more inter-winding capacitance.
     inductor_winding_c=15e-12,
     inductor_dcr_per_sqrt_h=300.0,
+    inductor_q_at_srf=10.0,             # cheap leaded choke, lossier core
     capacitor_esl=4e-9,                 # leads dominate over the body
     capacitor_esr=0.05,
     resistor_series_l=8e-9,
@@ -233,23 +265,3 @@ def get_profile(name: str | TechnologyProfile | None) -> TechnologyProfile:
         raise ValueError(
             f"Unknown technology profile {name!r}. Available: {sorted(PROFILES)}"
         ) from None
-
-
-if __name__ == "__main__":
-    print("Predicted inductor self-resonance by profile")
-    print("(compare against any real inductor's datasheet SRF)\n")
-    header = f"{'L':>10} " + "".join(f"{p.name:>16}" for p in PROFILES.values())
-    print(header)
-    print("-" * len(header))
-    for l_h, label in ((100e-6, "100u"), (1e-3, "1m"), (10e-3, "10m"), (100e-3, "100m")):
-        row = f"{label:>10} "
-        for p in PROFILES.values():
-            srf = p.inductor_srf_hz(l_h)
-            row += f"{'-' if srf is None else f'{srf / 1e3:,.0f} kHz':>16}"
-        print(row)
-    print("\nDCR at those values (both non-ideal profiles use the same law):")
-    for l_h, label in ((100e-6, "100u"), (1e-3, "1m"), (10e-3, "10m"), (100e-3, "100m")):
-        print(f"{label:>10}  {SMD_PCB.inductor_dcr(l_h):8.2f} ohm")
-    print("\nProfile descriptions as the design prompt would see them:\n")
-    for p in PROFILES.values():
-        print(f"[{p.name}] {p.describe()}\n")

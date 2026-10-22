@@ -22,10 +22,12 @@ def expand_with_parasitics(components, profile, input_node: str,
 
     Equivalent circuits used:
 
-      inductor    ideal L in series with its DCR, winding capacitance Cp
-                  across the pair. Cp is what gives the part a self-
-                  resonant frequency, above which it stops behaving as an
-                  inductor at all.
+      inductor    four elements: the series DCR, then the ideal L in
+                  parallel with its winding capacitance Cp and a loss
+                  resistance Rp. Cp sets the self-resonant frequency, above
+                  which the part stops behaving as an inductor at all; Rp
+                  sets how sharp that resonance is, and without it DCR is
+                  the only damping and the peak is unphysically high.
       capacitor   ideal C in series with ESL and ESR.
       resistor    ideal R in series with its lead inductance, with a small
                   shunt capacitance across it.
@@ -85,13 +87,28 @@ def expand_with_parasitics(components, profile, input_node: str,
 
         if comp.type == "inductor":
             dcr = profile.inductor_dcr(v)
-            mid = f"{comp.id}_i" if dcr else b
-            lines.append(f"{comp.id} {a} {mid} {value}")
+            rp = profile.inductor_rp(v)
+            # R_dcr sits OUTSIDE the parallel block - the wire resistance is
+            # in series with the whole winding:
+            #
+            #     a --[R_dcr]-- <id>_i --+--( L )--+-- b
+            #                            +-- C_p --+
+            #                            +-- R_p --+
+            #
+            # Putting R_dcr inside instead (C_p across L+R_dcr) is also a
+            # standard drawing and measures identically to four significant
+            # figures up to 10 MHz; the two only diverge above the frequency
+            # where 1/(omega*Cp) drops below R_dcr, by which point a real
+            # winding is distributed and neither lumped form means much.
+            tank = f"{comp.id}_i" if dcr else a
             if dcr:
-                lines.append(f"R_{comp.id}_dcr {mid} {b} {dcr:.6e}")
+                lines.append(f"R_{comp.id}_dcr {a} {tank} {dcr:.6e}")
+            lines.append(f"{comp.id} {tank} {b} {value}")
             if profile.inductor_winding_c:
-                lines.append(f"C_{comp.id}_wnd {a} {b} "
+                lines.append(f"C_{comp.id}_wnd {tank} {b} "
                              f"{profile.inductor_winding_c:.6e}")
+            if rp:
+                lines.append(f"R_{comp.id}_par {tank} {b} {rp:.6e}")
 
         elif comp.type == "capacitor":
             node = a

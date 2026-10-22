@@ -131,6 +131,50 @@ def test_smd_resonates_higher_than_breadboard():
         assert SMD_PCB.inductor_srf_hz(l_h) > BREADBOARD.inductor_srf_hz(l_h)
 
 
+def test_rp_is_q_times_tank_impedance():
+    """R_p = Q * sqrt(L/Cp). That product IS the impedance the tank presents
+    at resonance, so R_p is directly the height of the self-resonant peak -
+    measured as 258 kohm set / 258 kohm peak, 46 k / 46 k, 1155 k / 1140 k.
+    """
+    for profile in (SMD_PCB, BREADBOARD):
+        for l_h in (318.3e-6, 10e-3):
+            expected = profile.inductor_q_at_srf * math.sqrt(
+                l_h / profile.inductor_winding_c)
+            assert profile.inductor_rp(l_h) == pytest.approx(expected)
+
+
+def test_rp_scales_with_sqrt_of_inductance():
+    """sqrt(L/Cp) is 4.6 kohm at 318 uH but 25.8 kohm at 10 mH, which is why
+    a dimensionless Q is stored rather than a fixed resistance."""
+    assert BREADBOARD.inductor_rp(10e-3) / BREADBOARD.inductor_rp(100e-6) == \
+        pytest.approx(10.0, rel=1e-6)
+
+
+def test_rp_is_zero_without_a_tank_to_damp():
+    from dataclasses import replace
+
+    assert IDEAL.inductor_rp(10e-3) == 0.0
+    # no winding capacitance means no resonance, so nothing for R_p to do
+    assert replace(BREADBOARD, inductor_winding_c=0.0).inductor_rp(10e-3) == 0.0
+    assert replace(BREADBOARD, inductor_q_at_srf=0.0).inductor_rp(10e-3) == 0.0
+
+
+def test_breadboard_inductors_are_lossier_than_smd():
+    """Cheap leaded chokes have worse cores: Q = 10 against 20."""
+    assert BREADBOARD.inductor_q_at_srf < SMD_PCB.inductor_q_at_srf
+
+
+def test_rp_does_not_move_the_resonant_frequency():
+    """R_p changes only how sharp the resonance is. If it shifted the SRF the
+    datasheet cross-check would stop being valid."""
+    from dataclasses import replace
+
+    for q in (0.0, 1.0, 10.0, 80.0):
+        variant = replace(BREADBOARD, inductor_q_at_srf=q)
+        assert variant.inductor_srf_hz(10e-3) == \
+            pytest.approx(BREADBOARD.inductor_srf_hz(10e-3))
+
+
 def test_dcr_scales_with_sqrt_of_inductance():
     assert SMD_PCB.inductor_dcr(10e-3) / SMD_PCB.inductor_dcr(100e-6) == \
         pytest.approx(10.0, rel=1e-6)
@@ -193,9 +237,42 @@ def test_expansion_keeps_the_source_ideal(expanded):
     assert "V1 in 0 AC 1" in expanded.splitlines()
 
 
+def test_inductor_is_the_four_element_model(expanded):
+    """
+        a --[R_dcr]-- L1_i --+--( L1 )--+-- b
+                             +-- C_wnd -+
+                             +-- R_par -+
+
+    R_dcr in series OUTSIDE the parallel block; L, C_wnd and R_par all span
+    the same node pair. Putting R_dcr inside instead measures identically up
+    to 10 MHz, but this is the conventional drawing and floors |Z| at the
+    wire resistance rather than letting it fall to zero.
+    """
+    spans = {}
+    for line in expanded.splitlines():
+        if line.startswith(("L1 ", "R_L1_dcr ", "C_L1_wnd ", "R_L1_par ")):
+            ident, n1, n2, *_ = line.split()
+            spans[ident] = (n1, n2)
+
+    assert set(spans) == {"L1", "R_L1_dcr", "C_L1_wnd", "R_L1_par"}
+    tank_in, tank_out = spans["L1"]
+    assert spans["C_L1_wnd"] == (tank_in, tank_out), "Cp parallels the inductor"
+    assert spans["R_L1_par"] == (tank_in, tank_out), "Rp parallels the inductor"
+    # DCR feeds the tank's input node and comes from somewhere else entirely
+    assert spans["R_L1_dcr"][1] == tank_in
+    assert spans["R_L1_dcr"][0] != tank_out
+
+
+def test_expansion_uses_the_profiles_rp_value(expanded):
+    rp = BREADBOARD.inductor_rp(23.87e-3)
+    line = next(l for l in expanded.splitlines() if l.startswith("R_L1_par "))
+    assert float(line.split()[-1]) == pytest.approx(rp, rel=1e-5)
+
+
 def test_expansion_adds_the_expected_elements(expanded):
     assert "C_L1_wnd" in expanded, "inductor winding capacitance"
     assert "R_L1_dcr" in expanded, "inductor DCR"
+    assert "R_L1_par" in expanded, "inductor parallel loss resistance"
     assert "L_C1_esl" in expanded, "capacitor ESL"
     assert "R_C1_esr" in expanded, "capacitor ESR"
     assert "L_R1_ser" in expanded, "resistor lead inductance"
