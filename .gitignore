@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# ---------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------------
+# Test and tooling caches
+# ---------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---------------------------------------------------------------------
+# Generated output
+#
+# Everything under out/ is produced by a run: schematics, netlists, Bode
+# plots, and the live-run log. None of it is source, and the simulators
+# scatter byproducts (.raw/.log/.net/.op.raw) beside whatever they are
+# given, so the whole tree is ignored.
+# ---------------------------------------------------------------------
+out/
+
+# Simulator byproducts anywhere else they land
+*.raw
+*.op.raw
+*.net
+*.log
+
+# ---------------------------------------------------------------------
+# Editors and OS
+# ---------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+Desktop.ini

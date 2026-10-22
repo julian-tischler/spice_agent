@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spice-agent"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Puts tests/ on sys.path so the shared helpers in tests/_support
+# are importable from any test subdirectory.
+pythonpath = ["tests"]
+# Keep temp dirs only for failing tests. The default ("all") rotates three
+# runs' worth of dirs through %TEMP%, and pytest's own cleanup of them is
+# unreliable on Windows (it can't remove the symlinks it creates).
+tmp_path_retention_policy = "failed"
+markers = [
+    "live: hits the real Gemini API (needs GEMINI_API_KEY)",
+    "ltspice: drives LTspice.exe (skipped when not installed)",
+]
