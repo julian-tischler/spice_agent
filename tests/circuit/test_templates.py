@@ -4,17 +4,23 @@ its comment promises (cutoff / centre frequency, passband gain, rolloff
 slope, notch depth, ...).
 
 Run with pytest:
-    python -m pytest tests/test_netlist_templates.py -v
+    python -m pytest tests/circuit/test_templates.py -v
 
 Or as a plain script to get a human-readable summary table of measured
 vs expected values for all templates (no pytest needed):
-    python tests/test_netlist_templates.py
+    python tests/circuit/test_templates.py
 """
 
 import math
 import sys
+from pathlib import Path
 
 import pytest
+
+# Under pytest, tests/ is on sys.path via pyproject's `pythonpath` setting.
+# Run as a plain script (see the module docstring) nothing has set that up,
+# so put it there ourselves or the _support import below fails.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spice_agent.templates import NETLIST_TEMPLATES
 from _support.ngspice_raw import (
@@ -240,7 +246,7 @@ def main():
             f"{_fmt(EXPECTED_FREQ[name]):>10s} {slope_s:>14s} {extra:>14s}"
         )
 
-    print("\nRun `python -m pytest tests/test_netlist_templates.py -v` for pass/fail assertions.")
+    print("\nRun `python -m pytest tests/circuit/test_templates.py -v` for pass/fail assertions.")
     return 1 if failures else 0
 
 

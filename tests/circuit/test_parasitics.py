@@ -1,6 +1,6 @@
 """
-Tests for the parasitic model (spice_agent.parasitics) and its expansion
-into netlists (netlist_generator.expand_with_parasitics).
+Tests for the parasitic model (spice_agent.circuit.parasitics) and its expansion
+into netlists (circuit.expansion.expand_with_parasitics).
 
 Three things are being pinned:
 

@@ -1,5 +1,5 @@
 """
-Tests for the optional LTspice export (spice_agent.ltspice_export).
+Tests for the optional LTspice export (spice_agent.export).
 
 Three layers:
 
@@ -17,8 +17,8 @@ Three layers:
 3. CLI: `--asc/--cir` on the agent write the files (with a fake model).
 
 Run:
-    python -m pytest tests/test_ltspice_export.py -v
-    python -m pytest tests/test_ltspice_export.py -v -m "not ltspice"
+    python -m pytest tests/export/test_ltspice_export.py -v
+    python -m pytest tests/export/test_ltspice_export.py -v -m "not ltspice"
 """
 
 import re

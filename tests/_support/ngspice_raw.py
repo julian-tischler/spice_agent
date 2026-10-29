@@ -10,7 +10,7 @@ a frequency column followed by real and imaginary parts, so the file has
     freq, re(v(out)), im(v(out)), freq, re(v(in)), im(v(in))
 
 This differs from the 4-column vdb()/vp() layout that
-spice_agent.simulate.run_ngspice_ac() parses — hence a separate parser
+spice_agent.simulation.run_ngspice_ac() parses — hence a separate parser
 here rather than reusing that one.
 """
 

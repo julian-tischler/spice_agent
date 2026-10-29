@@ -5,7 +5,7 @@ behaviour.
 These are NOT produced by the agent. They exist to prove the ngspice
 pipeline works and to serve as ground truth for what a correct design
 looks like: every template carries the formula for its cutoff or centre
-frequency in a comment, and tests/test_netlist_templates.py simulates
+frequency in a comment, and tests/circuit/test_templates.py simulates
 each one and checks it against that formula.
 
 Each template is a format string with one {output_path} placeholder.

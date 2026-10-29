@@ -1,5 +1,5 @@
 """
-Tests for the Bode plot (spice_agent.bode_plot).
+Tests for the Bode plot (spice_agent.plotting).
 
 A plot is hard to assert on directly, so these check the two things that
 actually go wrong: that a file is produced at all, and that the

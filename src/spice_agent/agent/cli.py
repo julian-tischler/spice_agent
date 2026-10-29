@@ -99,7 +99,7 @@ def export_design(run: AgentRunResult, asc_path=None, cir_path=None, plot_path=N
     """
     Write the run's final circuit as LTspice files and/or a Bode plot.
     Both modules are imported lazily so the core agent depends on neither
-    the optional ltspice_export nor matplotlib.
+    the optional export package nor matplotlib.
     """
     circuit_json = run_circuit_json(run)
     info: dict = {}
