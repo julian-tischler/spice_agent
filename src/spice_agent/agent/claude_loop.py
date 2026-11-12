@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from spice_agent.agent.loop import AgentRunResult, call_simulate_circuit_tool
+from spice_agent.agent.loop import AgentRunResult, call_simulate_circuit_tool, feedback_text
 from spice_agent.agent.prompts import build_system_prompt
 from spice_agent.agent.tool_schema import CIRCUIT_JSON_SCHEMA
 from spice_agent.runlog import RunRecorder
@@ -238,7 +238,7 @@ def run_claude_loop(
                 run.history.append({"iteration": iteration, "circuit": None, "result": result})
                 recorder.record_simulation(iteration, None, result)
                 run.final_result = result
-                prompt = f"Simulation result: {json.dumps(result)}"
+                prompt = feedback_text(result)
                 continue
 
             log(f"Model proposed circuit: {json.dumps(args, indent=2)}")
@@ -256,8 +256,7 @@ def run_claude_loop(
                 run.passed = True
                 log(f"\nPASS: spec met after {iteration} iteration(s).")
                 break
-            prompt = (f"Simulation result: {json.dumps(result)}\n"
-                      "Propose a corrected circuit (JSON only).")
+            prompt = feedback_text(result) + "\nPropose a corrected circuit (JSON only)."
         else:
             log(f"\nFAIL: iteration budget ({max_iterations}) exhausted without meeting spec.")
     except ClaudeUsageLimitError as e:

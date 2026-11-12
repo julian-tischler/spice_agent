@@ -363,6 +363,22 @@ def test_cli_parses_stopband_args():
     a = parse_args(["--type", "lowpass", "--target", "10000",
                     "--stopband-hz", "100000", "--stopband-atten", "40"])
     assert a.stopband_hz == 100_000 and a.stopband_atten == 40
+    assert a.stopband_end is None
+
+
+def test_cli_stopband_end_reaches_the_spec(monkeypatch):
+    """--stopband-end must land in the DesignSpec the loop is run with."""
+    import spice_agent.agent.cli as cli
+
+    seen = {}
+    monkeypatch.setattr(cli, "run_agent_loop",
+                        lambda spec, **kw: seen.setdefault("spec", spec) and
+                        cli.AgentRunResult(spec=spec, passed=False, iterations=0))
+    cli.main(["--no-log", "--type", "lowpass", "--target", "10000",
+              "--stopband-hz", "100000", "--stopband-atten", "40",
+              "--stopband-end", "1e6"])
+    assert seen["spec"].stopband_end_hz == 1e6
+    assert "everywhere from 100000 Hz to 1e+06 Hz" in seen["spec"].describe()
 
 
 def test_plot_marks_the_stopband(tmp_path):
@@ -373,3 +389,87 @@ def test_plot_marks_the_stopband(tmp_path):
               spec=DesignSpec("lowpass", 10_000, stopband_hz=100_000,
                               stopband_atten_db=40), quiet=True)
     assert out.exists() and out.read_bytes()[:4] == b"\x89PNG"
+
+
+# ---------------------------------------------------------------------
+# Feedback when both causes apply, and the actionable extras
+# ---------------------------------------------------------------------
+
+def _synthetic_lowpass(fc=1e4, leak_db_at_1e8=-25.0):
+    """2nd-order Butterworth plus a leakage path rising 20 dB/decade - the
+    shape a breadboard's input-output stray capacitance produces. At
+    100 kHz it is 40.0 dB down (order-limited); at 100 MHz the leak has
+    pulled it back up to ~25 dB (interior failure)."""
+    import numpy as np
+    import pandas as pd
+    f = np.logspace(0, 8, 801)
+    mag = 1 / np.sqrt(1 + (f / fc) ** 4) + 10 ** (leak_db_at_1e8 / 20) * (f / 1e8)
+    return pd.DataFrame({"freq": f, "gain_db": 20 * np.log10(mag)})
+
+
+def test_both_stopband_causes_are_reported():
+    """The live breadboard run that motivated this: 38.9 dB at the edge AND
+    25 dB at 100 MHz. Reporting only the resonance told the model 'more
+    order will not help', and it never tried 3rd order."""
+    r = check_filter_spec(_synthetic_lowpass(),
+                          DesignSpec("lowpass", 10_000, stopband_hz=100_000,
+                                     stopband_atten_db=45))
+    assert r["passed"] is False
+    assert r["stopband_causes"] == ["order", "resonance"]
+    assert "TWO separate stopband problems" in r["message"]
+    assert "ORDER must increase" in r["message"]
+    assert "NOT at the band edge" in r["message"]
+    assert "raising the order fixes (1) but not this" in r["message"]
+    assert "increasing the order will not help on its own" not in r["message"]
+
+
+def test_order_advice_names_an_order():
+    """1 decade, 45 dB (+3 dB margin): Butterworth order 2 gives 40.0 dB,
+    order 3 gives 60.0 dB, so 3 is the suggestion; the synthetic filter
+    itself is 2nd order."""
+    r = check_filter_spec(_synthetic_lowpass(),
+                          DesignSpec("lowpass", 10_000, stopband_hz=100_000,
+                                     stopband_atten_db=45))
+    assert r["suggested_order"] == 3
+    assert r["effective_order"] == pytest.approx(2.0, abs=0.1)
+    assert "Butterworth of order 3 gives 60.0 dB" in r["message"]
+    assert "order 2 gives only 40.0 dB" in r["message"]
+
+
+def test_failed_stopband_carries_a_profile():
+    r = check_filter_spec(_synthetic_lowpass(),
+                          DesignSpec("lowpass", 10_000, stopband_hz=100_000,
+                                     stopband_atten_db=45))
+    hz = [p["hz"] for p in r["stopband_profile"]]
+    assert hz == pytest.approx([1e5, 1e6, 1e7, 1e8], rel=1e-3)
+    assert r["stopband_profile"][-1]["atten_db"] == pytest.approx(r["stopband_atten_db"], abs=0.1)
+    assert "attenuation across the band: 100 kHz" in r["message"]
+
+
+def test_highpass_profile_runs_downward(sweeps):
+    r = check_filter_spec(sweeps["hp1"],
+                          DesignSpec("highpass", 10_000, stopband_hz=1_000,
+                                     stopband_atten_db=40))
+    hz = [p["hz"] for p in r["stopband_profile"]]
+    assert hz[0] == pytest.approx(1_000) and hz == sorted(hz, reverse=True)
+
+
+def test_cutoff_miss_gives_the_exact_scale_factor(sweeps):
+    """RC at 10 kHz judged against a 5 kHz target: k = 2. Applying the
+    hint must actually land on target."""
+    r = check_filter_spec(sweeps["rc1"], DesignSpec("lowpass", 5_000))
+    assert r["passed"] is False
+    k = r["frequency_scale_factor"]
+    assert k == pytest.approx(2.0, rel=0.02)
+    assert "multiply EVERY inductor and capacitor value by" in r["message"]
+
+    scaled = dict(RC_1ST, components=[
+        dict(c, value=f"{10e-9 * k:.6g}") if c["id"] == "C1" else c
+        for c in RC_1ST["components"]], analysis=AC)
+    assert simulate_and_verify(scaled, DesignSpec("lowpass", 5_000))["passed"] is True
+
+
+def test_no_scale_hint_when_on_target(sweeps):
+    r = check_filter_spec(sweeps["rc1"], DesignSpec("lowpass", 10_000))
+    assert "frequency_scale_factor" not in r
+    assert "multiply EVERY" not in r["message"]

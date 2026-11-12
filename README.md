@@ -29,10 +29,11 @@ python -m spice_agent.agent --type lowpass --target 10000 \
          DesignSpec                      what must be true of the design
              │
              ▼
-   agent/  prompts.py ──► Gemini         brief in, circuit JSON out
-             │               │           (paced and retried: rate_limit.py)
-             │               ▼
-             └──► loop.py ◄──┘
+   agent/  prompts.py ──► Gemini  or  Claude      brief in, circuit JSON out
+             │          loop.py    claude_loop.py
+             │       (rate_limit.py)  (`claude -p`)
+             │               │
+             └──► run loop ◄─┘ ──► runlog.py   every iteration on disk
                      │  proposed components as JSON
                      ▼
    circuit/  model.py            JSON → validated Circuit
@@ -76,11 +77,11 @@ LTspice is optional — only the schematic export and its cross-checks use it.
 ```bash
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e .
-.venv/Scripts/python.exe -m pip install pandas numpy matplotlib google-genai pytest
+.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-> `pyproject.toml` does not yet declare runtime dependencies, so the second
-> line is currently required. Worth fixing.
+> `pyproject.toml` does not yet declare runtime dependencies, so the
+> `requirements.txt` line is currently required. Worth fixing.
 
 Check that both simulators were found:
 
@@ -88,8 +89,16 @@ Check that both simulators were found:
 .venv/Scripts/python.exe -m spice_agent.paths
 ```
 
-For the agent itself, set `GEMINI_API_KEY`. Everything else — simulation,
-verification, export, plotting — works without any API key.
+The agent has two interchangeable model backends:
+
+- **Gemini** (default): set `GEMINI_API_KEY`.
+- **Claude** (`--backend claude`): drives Claude Code's headless mode
+  (`claude -p`) on a Claude Pro/Max subscription. Needs the `claude` CLI
+  installed and logged in; it is looked up via `CLAUDE_BIN`, then `PATH`, then
+  the binary bundled with the VS Code extension.
+
+Everything else — simulation, verification, export, plotting — works without
+any API key or CLI.
 
 ---
 
@@ -108,7 +117,7 @@ disagree.
 | `min_notch_depth_db` | `20.0` | notch only: minimum depth below passband |
 | `stopband_hz` | `None` | LP/HP: edge of the stopband nearest the passband |
 | `stopband_atten_db` | `None` | LP/HP: minimum attenuation across that stopband |
-| `stopband_end_hz` | `None` | LP/HP: far edge; defaults to the end of the sweep |
+| `stopband_end_hz` | `None` | LP/HP: far edge (`--stopband-end`); defaults to the end of the sweep |
 | `technology` | `"ideal"` | `ideal`, `smd_pcb` or `breadboard` |
 
 `describe()` renders it as the line the model actually reads:
@@ -176,10 +185,78 @@ python -m spice_agent.agent --type lowpass --target 10000 \
     --asc out/designs/d.asc --cir out/designs/d.cir --plot out/plots/d.png
 ```
 
-`--max-iterations` caps the budget (default 6). `--min-interval`,
-`--max-retries` and `--initial-backoff` control API pacing; a daily-quota 429
-is detected from the server's own `RetryInfo` and fails fast rather than
-burning the retry budget on waits that cannot succeed.
+`--max-iterations` caps the budget (default 6 for Gemini, 5 for Claude) and
+`--model` overrides the model (default `gemini-3.5-flash` / `haiku`).
+`--min-interval`, `--max-retries` and `--initial-backoff` control Gemini API
+pacing; a daily-quota 429 is detected from the server's own `RetryInfo` and
+fails fast rather than burning the retry budget on waits that cannot succeed.
+
+### Use a Claude subscription instead of the Gemini API
+
+```bash
+python -m spice_agent.agent --backend claude --type lowpass --target 10000 \n    --stopband-hz 100000 --stopband-atten 40
+```
+
+`claude -p` has no native function calling here, so the model is forced to
+reply with JSON matching the same circuit schema (`--json-schema`) and the
+harness runs the simulation itself. One session is resumed across iterations,
+so each turn only sends the new simulation result.
+
+Because a subscription quota is shared with interactive use, the defaults are
+deliberately frugal: `haiku` at `--effort low`, every built-in tool, MCP
+server, skill, hook and settings file switched off, and the call run from an
+empty temp dir so no `CLAUDE.md` is loaded. Token use is tallied and printed at
+the end, and a usage-limit or auth error stops the run immediately instead of
+retrying.
+
+### Run logs
+
+Every agent run writes a self-contained folder (disable with `--no-log`,
+relocate the root with `--runs-dir` or `SPICE_AGENT_RUNS_DIR`). Folders are
+filed by whether a real model was called:
+
+```
+out/runs/
+    live/        gemini and claude runs — real data, keep it
+    dry/         everything else (analytic baselines, scripted fakes) —
+                 safe to delete whenever you like
+```
+
+`live` is decided by the backend; code calling `RunRecorder.start` directly
+can force either with `live=True/False`. The test suite never writes here:
+`tests/conftest.py` points the run log at a temp directory.
+
+```
+out/runs/live/2026-11-10T14-32-07_lowpass-10000Hz_claude-haiku/
+    run.json            manifest: request, spec, backend/model, environment,
+                        per-iteration timing/usage/verdict, status, outputs
+    request.txt         the verbatim command line
+    spec.json           the DesignSpec built from it
+    system_prompt.txt   the exact brief sent to the model
+    iter_01/            prompt, command, raw model response, proposed circuit,
+                        netlist(s), ngspice.log, sweep.csv, result.json
+    history.png         every iteration's Bode curve + its component values
+    final/              circuit.json/.asc/.cir and bode.png — only on a pass
+```
+
+`history.png` is drawn after every run, passed or failed, straight from the
+saved `sweep.csv`, `circuit.json` and `result.json` files; nothing is
+re-simulated. Curves go from light (first attempt) to dark (latest). The
+grey zones are the target cutoff band and the stopband region the response
+must stay out of. The table underneath lists each component position per
+iteration, with identical parallel parts collapsed (`20x 30n`), and what each
+iteration measured. To redraw it for any existing run:
+
+```bash
+python -m spice_agent.run_plot out/runs/live/<run-folder>
+```
+
+Each of `live/` and `dry/` has its own `index.jsonl`, one summary line per
+run. The manifest is written
+before the first model call and finalised on exit — including errors and
+Ctrl+C, which end with status `error` / `aborted` — so a crashed run still
+leaves a readable record. Environment variables whose names contain `KEY`,
+`TOKEN`, `SECRET` or `PASSWORD` are redacted from everything written.
 
 ### Design for a real board
 
@@ -193,6 +270,11 @@ parasitic equivalent before simulation, and the sweep extends to 100 MHz
 because parasitics are invisible below roughly 1 MHz. The model is told which
 technology it is designing for and the self-resonance guidance that implies.
 
+Without `--stopband-end`, the stopband then runs all the way to that 100 MHz
+sweep end. Bound it to the band that actually matters, for example
+`--stopband-end 10000000`; otherwise the breadboard's input–output stray
+coupling can make the far end unreachable for any passive design.
+
 The difference is not subtle. A textbook-correct 3rd-order Butterworth for
 500 kHz, simulated three ways:
 
@@ -205,6 +287,33 @@ The difference is not subtle. A textbook-correct 3rd-order Butterworth for
 The design is textbook-right and unbuildable on a breadboard: its 318 µH
 inductors self-resonate at 2.30 MHz, below the 5 MHz where the requirement
 even begins. No choice of component values fixes that.
+
+### What the model gets back
+
+Each failed iteration returns a verdict message written to be acted on, plus
+the measured numbers (rounded to 4 significant figures for the model; the run
+log keeps full precision). Depending on what failed, the message carries:
+
+- **Frequency miss:** the exact correction. Multiplying every L and C by
+  k = measured / target moves the whole response onto target without changing
+  its shape (`frequency_scale_factor`).
+- **Stopband too shallow at the edge:** the order is too low. The message says
+  how steep the design currently is (`effective_order`) and which order a
+  Butterworth needs for the requirement plus 3 dB margin (`suggested_order`).
+- **Stopband recovers inside the band:** something resonates or leaks around
+  the filter, so more order alone will not help.
+- **Both at once** are reported as two separate problems. Previously only one
+  was named, which told the model "more order will not help" even when the
+  edge was short as well.
+- **The shape of the band:** attenuation at the edge, at each decade, at the
+  far end and at the worst point.
+- **Parasitics diagnosis** (non-ideal technology only): a few extra local
+  simulations, no model tokens. Would the same design pass with ideal parts?
+  Which parasitic group costs the most, measured both on its own and by
+  removing it from the full model, and what helps against it? Which inductors and capacitors self-resonate inside the stopband? For
+  the textbook 10 kHz ladder on a breadboard it finds that the 2 pF input–output
+  coupling alone takes the stopband from 67.5 to 1.5 dB, because the ladder
+  ends in a series inductor and `out` has no shunt path to ground.
 
 ### Verify a circuit without an LLM
 
@@ -230,7 +339,10 @@ print(result["message"])
 ```
 
 `simulate_get_full_sweep(circuit, technology="breadboard")` returns the whole
-sweep as a DataFrame for plotting or your own analysis.
+sweep as a DataFrame for plotting or your own analysis. Phase is in degrees.
+
+For a non-ideal technology, the Bode plot overlays the ideal-component response
+(grey) on the as-built one, so the parasitic damage is visible at a glance.
 
 ### Explore from the console
 
@@ -267,18 +379,19 @@ open is what was simulated — parasitics and all. On the breadboard profile a
 ## Testing
 
 ```bash
-python -m pytest -m "not live"   # 221 tests, needs only ngspice  (~55 s)
+python -m pytest -m "not live"   # 241 tests, needs only ngspice  (~55 s)
 python -m pytest -m ltspice      #  15 tests, drives LTspice.exe
 python -m pytest -m live         #   5 tests, calls Gemini; needs an API key
 ```
 
-226 total. The LTspice and live tests skip themselves when the binary or the
+246 total (the 15 LTspice tests are part of the "not live" set). The Claude
+backend is tested against a scripted runner, so no test calls `claude`. The LTspice and live tests skip themselves when the binary or the
 key is missing, so `python -m pytest` works on a bare checkout.
 
 Two conventions worth keeping if you extend the suite. Expected values come
 from circuits that were **measured first**, with the figure recorded in a
 comment — guessed thresholds caused several false failures early on. And live
-runs append every iteration's proposal to `out/runs/live_runs.jsonl`, because
+runs append every iteration's proposal to `out/runs/live/live_runs.jsonl`, because
 a live run costs quota and produces a real design; keeping only pass/fail
 discards the most interesting output in the suite.
 
@@ -317,11 +430,17 @@ and so ground bounce — finer-grained than the rest of the model justifies.
 unenforced: nothing stops the agent proposing a 23.87 mH inductor in an 0603
 package.
 
-**The feedback does not yet attribute a parasitic failure to a component.** It
-correctly says "something is resonating; increasing the order will not help",
-but does not name which inductor, give its self-resonant frequency, or point
-out that the design would have passed ideally. That is the next thing worth
-building.
+**Parasitic attribution is per group, not per pair.** Each group is measured
+on its own and by removal, and ranked by the larger effect. That catches both
+a parasitic that does all the damage alone and one that only hurts in
+combination, but it does not say *which* pair interacts. The advice attached
+to each group is a rule of thumb, not a computed fix.
+
+**A spec can be infeasible and nothing says so.** With parasitics on, the
+stopband runs to 100 MHz by default, and on a breadboard the input–output
+coupling floor may make 40 dB there unreachable by any passive design. The
+loop then spends its whole budget. Set `--stopband-end` to the band that
+actually matters.
 
 ---
 

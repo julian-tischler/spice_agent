@@ -46,6 +46,47 @@ def _gemini_usage(response) -> dict | None:
             "total_tokens": getattr(u, "total_token_count", None)}
 
 
+FEEDBACK_SIG_FIGS = 4
+
+
+def _round_sig(x: float, sig: int = FEEDBACK_SIG_FIGS) -> float:
+    if x == 0 or x != x or x in (float("inf"), float("-inf")):
+        return x
+    return float(f"{x:.{sig}g}")
+
+
+def _rounded(obj):
+    if isinstance(obj, float):
+        return _round_sig(obj)
+    if isinstance(obj, dict):
+        return {k: _rounded(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_rounded(v) for v in obj]
+    return obj
+
+
+def model_feedback(result: dict) -> dict:
+    """
+    The result as the MODEL sees it. The run log keeps the full-precision
+    result; the model gets floats rounded to 4 significant figures (nobody
+    designs to 8834.024632825794 Hz) and no field that the message already
+    spells out in words, so every iteration costs fewer tokens.
+    """
+    fb = _rounded(result)
+    fb.pop("stopband_profile", None)          # rendered in the message
+    if isinstance(fb.get("parasitics"), dict):
+        fb["parasitics"] = {k: v for k, v in fb["parasitics"].items() if k != "summary"}
+    return fb
+
+
+def feedback_text(result: dict) -> str:
+    """Plain-text feedback for a backend without function calling: the
+    verdict in words first, the measured numbers after."""
+    fb = model_feedback(result)
+    message = fb.pop("message", "")
+    return f"Simulation result: {message}\n\nMeasured data: {json.dumps(fb)}"
+
+
 MODEL_NAME = "gemini-3.5-flash"  # swap for a stronger model later if needed
 DEFAULT_MAX_ITERATIONS = 6
 
@@ -184,7 +225,7 @@ def run_agent_loop(
             function_response_parts.append(
                 types.Part.from_function_response(
                     name=fc.name,
-                    response={"result": result},
+                    response={"result": model_feedback(result)},
                 )
             )
 

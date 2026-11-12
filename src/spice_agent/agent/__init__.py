@@ -5,7 +5,9 @@ The LLM design agent.
     analysis.py     which AC sweep to use for a spec
     tool_schema.py  the JSON schema the model fills in
     prompts.py      the design brief it receives
-    loop.py         run_agent_loop - propose, simulate, feed back
+    loop.py         run_agent_loop - propose, simulate, feed back; also
+                    model_feedback / feedback_text, what the model is sent
+    claude_loop.py  run_claude_loop - the same loop over `claude -p`
     cli.py          argument parsing and post-run export
 
 Import from the package; the split above is an implementation detail.
@@ -23,6 +25,8 @@ from spice_agent.agent.loop import (
     MODEL_NAME,
     AgentRunResult,
     call_simulate_circuit_tool,
+    feedback_text,
+    model_feedback,
     run_agent_loop,
 )
 from spice_agent.agent.prompts import (
@@ -48,7 +52,9 @@ __all__ = [
     "build_technology_note",
     "call_simulate_circuit_tool",
     "export_design",
+    "feedback_text",
     "main",
+    "model_feedback",
     "parse_args",
     "run_agent_loop",
     "run_circuit_json",

@@ -22,10 +22,11 @@ are the model's job to derive.
          DesignSpec                      what must be true of the design
              │
              ▼
-   agent/  prompts.py ──► Gemini         brief in, circuit JSON out
-             │               │           (paced and retried: rate_limit.py)
-             │               ▼
-             └──► loop.py ◄──┘
+   agent/  prompts.py ──► Gemini  or  Claude      brief in, circuit JSON out
+             │          loop.py    claude_loop.py
+             │       (rate_limit.py)  (`claude -p`)
+             │               │
+             └──► run loop ◄─┘ ──► runlog.py   every iteration on disk
                      │  proposed components as JSON
                      ▼
    circuit/  model.py            JSON → validated Circuit
@@ -56,15 +57,21 @@ are the model's job to derive.
 | `simulation/metrics.py` | Pure measurement of a sweep. No notion of pass or fail. |
 | `simulation/spec.py` | `DesignSpec` — the requirement model. |
 | `simulation/verify.py` | `check_filter_spec` — the verdict, and the feedback text. |
-| `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call. |
-| `agent/rate_limit.py` | Pacing and retry. Knows nothing about circuits. |
+| `simulation/diagnosis.py` | Why a non-ideal design failed: ideal comparison, per-parasitic ablation, part self-resonances. |
+| `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call, including the diagnosis. |
+| `agent/analysis.py` | `analysis_for(spec)` — which AC sweep a spec is simulated with. A leaf module so prompts, loop and CLI need not import each other. |
+| `agent/rate_limit.py` | Pacing and retry for the Gemini API. Knows nothing about circuits. |
 | `agent/prompts.py` | The design brief. Pure string building, so it can be asserted. |
-| `agent/tool_schema.py` | The JSON schema the model fills in. |
-| `agent/loop.py` | `run_agent_loop` — propose, simulate, feed back, repeat. |
-| `agent/cli.py` | Argument parsing, and writing outputs when a design passes. |
+| `agent/tool_schema.py` | `CIRCUIT_JSON_SCHEMA`, the JSON the model fills in, and the Gemini tool declaration wrapping it. |
+| `agent/loop.py` | `run_agent_loop` — propose, simulate, feed back, repeat (Gemini function calling). Also `call_simulate_circuit_tool`, shared by both backends. |
+| `agent/claude_loop.py` | `run_claude_loop` — the same loop over `claude -p` with forced JSON output. |
+| `agent/cli.py` | Argument parsing, backend choice, and writing outputs when a design passes. |
 | `export/netlist.py` | `.cir` text, plus the as-built (parasitic-expanded) circuit. |
 | `export/schematic.py` | Symbol geometry, layout, `.asc` writer. |
 | `export/ltspice_cli.py` | Driving `LTspice.exe` for cross-checks. |
+| `runlog.py` | `RunRecorder` — one folder per agent run with every prompt, reply, netlist, sweep and verdict. |
+| `plotting.py` | Annotated Bode plot; overlays the ideal response for non-ideal technologies. |
+| `run_plot.py` | `history.png` for a run folder: all iterations overlaid, plus a component/metric table. Reads only the saved files. |
 | `paths.py` | Finding ngspice and LTspice. Override here or by env var. |
 | `units.py` | SPICE value parsing (`"23.87m"` → `0.02387`). |
 | `templates.py` | Nine hand-written reference netlists with known behaviour. |
@@ -81,8 +88,29 @@ only because `verify.py` would otherwise dominate the module.
 
 **Failure messages are written to be acted on, not just read.** The same 20 dB
 shortfall means different things in different places: at a stopband edge the
-filter order is too low, deeper in the band something is resonating. Those need
-opposite fixes, so `verify.py` distinguishes them explicitly and says so.
+filter order is too low, deeper in the band something is resonating or leaking.
+Those need different fixes, so `verify.py` diagnoses each one independently and
+reports both when both apply (`stopband_causes`). Naming only one used to tell
+the model "more order will not help" while the edge was also short. Frequency
+misses come with the exact L/C scale factor, and an order shortfall comes with
+a suggested Butterworth order.
+
+**The verdict and the diagnosis are separate layers.** `verify.py` judges one
+sweep and knows nothing about the circuit. `diagnosis.py` needs the circuit and
+the technology, because it re-simulates: once with ideal parts and once with
+each parasitic group on its own and once with each group removed. Both are
+needed because parasitics interact. On one ladder, removing the stray coupling
+made the stopband *worse*, while on its own it is the whole problem. On
+another, every group alone was harmless, while removing the winding
+capacitance won back 21 dB. Groups are ranked by the larger effect; the
+module docstring has the numbers. It only runs for a failed non-ideal design, never
+changes the verdict, and is skipped with `simulate_and_verify(..., diagnose=False)`.
+
+**The model sees a trimmed copy of the result.** `agent.loop.model_feedback`
+rounds floats to 4 significant figures and drops fields the message already
+spells out. Gemini receives it as the function response; the Claude backend
+gets `feedback_text`, which puts the message first and the numbers after. Run
+logs and `run.history` keep the full-precision result.
 
 **The stopband is checked across a band, not at one frequency.** A single-point
 check can be satisfied by a response that dips there and recovers — which is
@@ -101,8 +129,36 @@ so a short sweep would make the feature a no-op. Ideal mode keeps 1 Hz–1 MHz.
 from `model.py`, so a module-level import would be circular. The function-level
 import is the cycle break, and it is commented as such at the call site.
 
-**The Gemini client is injectable.** That is what allows the entire loop to be
-tested against a scripted fake with no network — see `tests/_support/fake_gemini.py`.
+**The model call is injectable in both backends.** `run_agent_loop` takes a
+Gemini `client`, `run_claude_loop` a `runner(cmd, prompt)`. That is what allows
+both loops to be tested against scripted fakes with no network or CLI — see
+`tests/_support/fake_gemini.py` and `tests/agent/test_claude_loop.py`.
+
+**Both backends share one tool implementation.** Gemini calls
+`simulate_circuit` through native function calling; the Claude backend has no
+tools and is instead forced (`--json-schema`) to reply with the same
+`CIRCUIT_JSON_SCHEMA`, which the harness then passes to the same
+`call_simulate_circuit_tool`. Feedback is therefore identical whichever model
+is driving. Both return an `AgentRunResult`.
+
+**The Claude backend fails fast on quota.** A subscription's limits are shared
+with interactive use, so a usage-limit or auth error raises immediately rather
+than entering a retry loop, and every call runs with tools, MCP, skills, hooks
+and settings disabled from an empty temp directory to keep requests small.
+
+**Run logging is threaded through as a `capture` dict and a recorder.**
+`simulate_and_verify` and `run_ngspice_ac` optionally fill a `capture` dict
+(netlist, ideal netlist, ngspice output, sweep); the loops hand it to a
+`RunRecorder`. `RunRecorder.disabled()` accepts every call and does nothing, so
+call sites never branch on whether logging is on. The recorder is a context
+manager in `cli.py`, which guarantees a final `run.json` even on an exception.
+
+**Netlist titles are forced to ASCII.** Models write things like "fc ≈ 1 kHz";
+the netlist is written in the platform encoding, so non-ASCII crashed the write
+on Windows and surfaced as a bogus circuit error.
+
+**ngspice's `vp()` is in radians.** `run_ngspice_ac` converts to degrees, so
+every `phase_deg` column really is degrees.
 
 ## Tests
 
@@ -116,6 +172,9 @@ Three markers divide them by what they need:
 python -m pytest -m "not live"     # default: needs only ngspice (~55 s)
 python -m pytest -m ltspice        # also drives LTspice.exe
 python -m pytest -m live           # also calls Gemini; needs GEMINI_API_KEY
+
+No test calls the `claude` CLI; the Claude backend runs against a scripted
+runner.
 ```
 
 The LTspice and live tests skip themselves automatically when the binary or
@@ -124,15 +183,25 @@ the API key is absent.
 Two conventions are worth keeping. Expected values come from circuits that were
 **measured first**, with the figure recorded in a comment — guessed thresholds
 caused several false failures early on. And live runs append to
-`out/runs/live_runs.jsonl` with every iteration's proposal, because a live run
+`out/runs/live/live_runs.jsonl` with every iteration's proposal, because a live run
 costs quota and produces a real design; keeping only pass/fail throws away the
 most interesting output in the suite.
 
 ## Generated output
 
 Everything under `out/` is produced by a run and is git-ignored:
-`out/designs/` for `.asc` and `.cir`, `out/plots/` for Bode plots,
-`out/runs/` for the live-run log.
+`out/designs/` for `.asc` and `.cir`, `out/plots/` for Bode plots, and
+`out/runs/` for run logs. Runs are split by mode: `out/runs/live/` holds runs
+that called a real model (the `gemini` and `claude` backends) plus the test
+suite's `live_runs.jsonl`, and is the data to keep; `out/runs/dry/` holds
+everything else (analytic baselines, scripted fakes) and can be deleted at any
+time. Each holds one `<timestamp>_<type>-<target>Hz_<backend>-<model>/` folder
+per run (layout documented at the top of `runlog.py`) and its own
+`index.jsonl`. `--runs-dir` or `SPICE_AGENT_RUNS_DIR` moves the root.
+
+Tests never write there: `tests/conftest.py` redirects `SPICE_AGENT_RUNS_DIR`
+to a temp directory for every test, since CLI tests drive scripted fakes that
+would otherwise be filed as live runs.
 
 ## Current limits
 

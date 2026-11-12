@@ -47,10 +47,11 @@ def test_cli_run_writes_a_complete_folder(fake_claude, tmp_path, monkeypatch):
             "--technology", "breadboard"]
     assert cli.main(argv) == 0
 
-    d = only_run(tmp_path / "runs")
+    d = only_run(tmp_path / "runs" / "live")
     assert "lowpass-1590Hz_claude-haiku" in d.name
     manifest = json.loads((d / "run.json").read_text())
     assert manifest["status"] == "passed" and manifest["iterations_used"] == 2
+    assert manifest["mode"] == "live"
     assert manifest["backend"] == "claude" and manifest["model"] == "haiku"
     assert manifest["spec"]["technology"] == "breadboard"
     assert manifest["request"]["argv"] == argv
@@ -77,8 +78,9 @@ def test_cli_run_writes_a_complete_folder(fake_claude, tmp_path, monkeypatch):
         assert (d / "final" / name).is_file(), name
     assert "final/bode.png" in manifest["files"]
 
-    index = [json.loads(line) for line in (tmp_path / "runs" / "index.jsonl").read_text().splitlines()]
+    index = [json.loads(line) for line in (tmp_path / "runs" / "live" / "index.jsonl").read_text().splitlines()]
     assert index[0]["status"] == "passed" and index[0]["path"] == d.name
+    assert index[0]["mode"] == "live"
 
 
 def test_no_log_writes_nothing(fake_claude, tmp_path, monkeypatch):
@@ -92,7 +94,7 @@ def test_explicit_outputs_still_written_and_noted(fake_claude, tmp_path, monkeyp
     png = tmp_path / "mine" / "plot.png"
     assert cli.main(["--backend", "claude", "--plot", str(png)]) == 0
     assert png.is_file()
-    manifest = json.loads((only_run(tmp_path / "runs") / "run.json").read_text())
+    manifest = json.loads((only_run(tmp_path / "runs" / "live") / "run.json").read_text())
     assert str(png) in manifest["external_outputs"]
 
 
@@ -104,7 +106,7 @@ def test_gemini_loop_is_recorded(tmp_path):
                              model_name="fake-model", retry_policy=NO_WAIT,
                              verbose=False, recorder=rec)
         rec.finish(run)
-    d = only_run(tmp_path)
+    d = only_run(tmp_path / "live")
     assert json.loads((d / "run.json").read_text())["status"] == "passed"
     raw = json.loads((d / "iter_01" / "model_response.json").read_text())
     assert "simulate_circuit" in json.dumps(raw)
@@ -116,7 +118,7 @@ def test_failed_run_status(tmp_path):
     rec = RunRecorder.start(spec=DesignSpec(), backend="gemini", model="m", argv=[], runs_dir=tmp_path)
     with rec:
         rec.finish(AgentRunResult(spec=DesignSpec(), passed=False, iterations=3))
-    assert json.loads((only_run(tmp_path) / "run.json").read_text())["status"] == "failed"
+    assert json.loads((only_run(tmp_path / "live") / "run.json").read_text())["status"] == "failed"
 
 
 def test_exception_leaves_a_readable_error_record(tmp_path):
@@ -124,7 +126,7 @@ def test_exception_leaves_a_readable_error_record(tmp_path):
     with pytest.raises(RuntimeError):
         with rec:
             raise RuntimeError("boom")
-    m = json.loads((only_run(tmp_path) / "run.json").read_text())
+    m = json.loads((only_run(tmp_path / "live") / "run.json").read_text())
     assert m["status"] == "error" and "boom" in m["error"]
 
 
@@ -133,7 +135,7 @@ def test_keyboard_interrupt_is_aborted(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         with rec:
             raise KeyboardInterrupt
-    assert json.loads((only_run(tmp_path) / "run.json").read_text())["status"] == "aborted"
+    assert json.loads((only_run(tmp_path / "live") / "run.json").read_text())["status"] == "aborted"
 
 
 def test_secrets_are_redacted(tmp_path, monkeypatch):
@@ -142,11 +144,11 @@ def test_secrets_are_redacted(tmp_path, monkeypatch):
                             argv=["--note", "sk-super-secret-value"], runs_dir=tmp_path)
     with rec:
         rec.set_system_prompt("key is sk-super-secret-value")
-    d = only_run(tmp_path)
+    d = only_run(tmp_path / "live")
     for f in d.rglob("*"):
         if f.is_file():
             assert "sk-super-secret-value" not in f.read_text(encoding="utf-8")
-    assert "sk-super-secret-value" not in (tmp_path / "index.jsonl").read_text()
+    assert "sk-super-secret-value" not in (tmp_path / "live" / "index.jsonl").read_text()
 
 
 def test_same_second_runs_do_not_collide(tmp_path):
@@ -165,3 +167,23 @@ def test_disabled_recorder_accepts_every_call():
         rec.record_simulation(1, {"netlist": "x"}, {"passed": True})
         rec.finish(AgentRunResult(spec=DesignSpec(), passed=True, iterations=1))
         assert rec.final_dir() is None
+
+
+@pytest.mark.parametrize("backend, live, mode", [
+    ("gemini", None, "live"),
+    ("claude", None, "live"),
+    ("analytic", None, "dry"),     # no model is called
+    ("gemini", False, "dry"),      # explicit override, e.g. a scripted fake
+    ("analytic", True, "live"),
+])
+def test_runs_are_filed_by_mode(tmp_path, backend, live, mode):
+    rec = RunRecorder.start(spec=DesignSpec(), backend=backend, model="m", argv=[],
+                            runs_dir=tmp_path, live=live)
+    with rec:
+        rec.finish(AgentRunResult(spec=DesignSpec(), passed=True, iterations=1))
+    assert rec.root.parent == tmp_path / mode
+    assert json.loads((rec.root / "run.json").read_text())["mode"] == mode
+    line = json.loads((tmp_path / mode / "index.jsonl").read_text())
+    assert line["mode"] == mode and line["path"] == rec.root.name
+    other = tmp_path / ("dry" if mode == "live" else "live")
+    assert not other.exists()

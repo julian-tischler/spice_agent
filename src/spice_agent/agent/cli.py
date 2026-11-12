@@ -49,6 +49,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--stopband-atten", type=float, default=None,
                    help="lowpass/highpass: dB of attenuation below passband required "
                         "at --stopband-hz (forces a higher-order topology)")
+    p.add_argument("--stopband-end", type=float, default=None, metavar="HZ",
+                   help="lowpass/highpass: far edge of the stopband. Default: the end "
+                        "of the sweep (1 MHz ideal, 100 MHz with a non-ideal "
+                        "--technology, where stray coupling may make the far end "
+                        "unreachable)")
     p.add_argument("--backend", choices=["gemini", "claude"], default="gemini",
                    help="gemini: Gemini API (needs GEMINI_API_KEY). claude: Claude Code "
                         "headless mode (`claude -p`) on your Claude subscription")
@@ -70,9 +75,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     lg = p.add_argument_group("run logging")
     lg.add_argument("--no-log", action="store_true",
                     help="do not write a run folder (default: every run is logged "
-                         "to out/runs/<timestamp>_.../)")
+                         "to out/runs/live/<timestamp>_.../)")
     lg.add_argument("--runs-dir", metavar="DIR", default=None,
-                    help="where run folders go (default: ./out/runs, or $SPICE_AGENT_RUNS_DIR)")
+                    help="root for run folders, which go in its live/ or dry/ "
+                         "subfolder (default: ./out/runs, or $SPICE_AGENT_RUNS_DIR)")
     rl = p.add_argument_group("rate limiting (gemini backend only)")
     rl.add_argument("--min-interval", type=float, default=RetryPolicy.min_interval_s,
                     help="minimum seconds between Gemini requests")
@@ -93,6 +99,7 @@ def main(argv=None) -> int:
         min_notch_depth_db=a.notch_depth,
         stopband_hz=a.stopband_hz,
         stopband_atten_db=a.stopband_atten,
+        stopband_end_hz=a.stopband_end,
         technology=a.technology,
     )
     argv_used = list(argv) if argv is not None else None
@@ -124,6 +131,8 @@ def main(argv=None) -> int:
             run = run_agent_loop(spec, model_name=model, max_iterations=iterations,
                                  retry_policy=policy, recorder=recorder)
         recorder.finish(run)
+        if recorder.enabled:
+            _plot_history(recorder)
 
         if run.passed:
             if recorder.enabled:
@@ -134,6 +143,22 @@ def main(argv=None) -> int:
                     if path:
                         recorder.note_external_output(path)
     return 0 if run.passed else 1
+
+
+def _plot_history(recorder: RunRecorder) -> None:
+    """history.png in the run folder: every iteration's Bode curve and the
+    component values it used. Pass or fail - the failures are the
+    interesting part. Never fatal; matplotlib is imported lazily."""
+    try:
+        from spice_agent.run_plot import plot_run_history
+
+        path = plot_run_history(recorder.root, quiet=True)
+        print(f"Wrote run history plot: {path}")
+    except ValueError:
+        pass                    # no simulated iteration: nothing to draw
+    except Exception as e:  # noqa: BLE001
+        recorder.note("history_plot_error", f"{type(e).__name__}: {e}")
+        print(f"Warning: could not plot the run history: {e}")
 
 
 def _export_final(run: AgentRunResult, recorder: RunRecorder) -> None:

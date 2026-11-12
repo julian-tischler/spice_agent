@@ -6,7 +6,7 @@ check iteration handling, the feedback actually sent back, budget
 exhaustion and recovery from a broken proposal - all without a network.
 
 The live tests (-m live) need GEMINI_API_KEY. They append every run to
-out/runs/live_runs.jsonl, because a live run costs quota and produces a real
+out/runs/live/live_runs.jsonl, because a live run costs quota and produces a real
 design; keeping only PASSED/FAILED would throw away the most interesting
 output in the suite.
 """
@@ -195,8 +195,8 @@ live = pytest.mark.skipif(
 # every iteration, so a run can be inspected long after pytest exits.
 LIVE_LOG = Path(os.environ.get(
     "SPICE_AGENT_LIVE_LOG",
-    # tests/agent/test_loop.py -> repo root -> out/runs/
-    Path(__file__).resolve().parents[2] / "out" / "runs" / "live_runs.jsonl",
+    # tests/agent/test_loop.py -> repo root -> out/runs/live/
+    Path(__file__).resolve().parents[2] / "out" / "runs" / "live" / "live_runs.jsonl",
 ))
 
 
@@ -266,3 +266,38 @@ def test_live_agent_converges(spec):
     assert run.final_result["error_pct"] == pytest.approx(0, abs=spec.tolerance_pct)
     if spec.stopband_hz is not None:
         assert run.final_result["stopband_atten_db"] >= spec.stopband_atten_db
+
+
+# ---------------------------------------------------------------------
+# What the model is sent (model_feedback / feedback_text)
+# ---------------------------------------------------------------------
+
+def test_feedback_is_rounded_but_the_log_keeps_full_precision():
+    client = FakeGeminiClient([_with_values(RC_LOWPASS, C1="1u"), RC_LOWPASS])
+    run = run_agent_loop(DesignSpec("lowpass", 1590), client=client,
+                         retry_policy=NO_WAIT, verbose=False)
+    sent = _last_function_response(client)["cutoff_hz"]
+    logged = run.history[0]["result"]["cutoff_hz"]
+    assert sent == float(f"{logged:.4g}")
+    assert sent == pytest.approx(logged, rel=1e-3)
+
+
+def test_model_feedback_drops_what_the_message_already_says():
+    from spice_agent.agent.loop import feedback_text, model_feedback
+
+    result = {"passed": False, "message": "FAIL. Diagnosis: ideal would pass.",
+              "cutoff_hz": 8834.024632825794,
+              "stopband_profile": [{"hz": 1e5, "atten_db": 38.94}],
+              "parasitics": {"summary": "ideal would pass", "ideal_parts_passed": True,
+                             "limiting_parasitics": [{"gain_db": 21.123456}]}}
+    fb = model_feedback(result)
+    assert fb["cutoff_hz"] == 8834.0
+    assert "stopband_profile" not in fb
+    assert "summary" not in fb["parasitics"]
+    assert fb["parasitics"]["limiting_parasitics"][0]["gain_db"] == 21.12
+    assert result["cutoff_hz"] == 8834.024632825794          # original untouched
+
+    text = feedback_text(result)
+    assert text.startswith("Simulation result: FAIL. Diagnosis")
+    data = json.loads(text.split("Measured data: ", 1)[1])
+    assert "message" not in data and data["cutoff_hz"] == 8834.0

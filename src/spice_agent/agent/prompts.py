@@ -90,6 +90,8 @@ Hint: {TOPOLOGY_HINTS[spec.filter_type]}
 
 Call the simulate_circuit tool with your proposed component values. You'll \
 get back the ACTUAL simulated response from ngspice — not a guess. If it \
-doesn't pass, revise your component values based on the real result and \
-try again. Keep component values realistic (resistors in ohms to megaohms, \
+doesn't pass, revise your design based on the real result and try again. \
+The result's message says what failed and how to fix it; act on its concrete \
+numbers (value scale factor, suggested order, limiting parasitic) rather than \
+guessing. Keep component values realistic (resistors in ohms to megaohms, \
 capacitors in pF to uF, inductors in uH to H)."""

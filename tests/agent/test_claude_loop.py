@@ -98,3 +98,13 @@ def test_auth_error_raises():
 def test_find_claude_prefers_env(monkeypatch):
     monkeypatch.setenv("CLAUDE_BIN", "/x/claude")
     assert claude_loop.find_claude() == "/x/claude"
+
+
+def test_feedback_puts_the_message_before_the_numbers():
+    runner = ScriptedRunner(envelope(BAD), envelope(RC_LOWPASS))
+    run_claude_loop(SPEC, runner=runner, verbose=False)
+    fed_back = runner.calls[1][1]
+    assert fed_back.index("Simulation result:") < fed_back.index("Measured data:")
+    assert "multiply EVERY inductor and capacitor" in fed_back   # BAD misses the cutoff
+    data = json.loads(fed_back.split("Measured data: ", 1)[1].split("\n")[0])
+    assert data["passed"] is False and "message" not in data

@@ -1,7 +1,14 @@
 """
-Per-run logging: one self-contained folder per agent run.
+Per-run logging: one self-contained folder per agent run, filed by mode.
 
-    out/runs/2026-11-10T14-32-07_lowpass-10000Hz_claude-haiku/
+    out/runs/
+        live/               runs that called a real model (gemini, claude):
+                            the data worth keeping
+        dry/                everything else (analytic baselines, scripted
+                            fakes): safe to delete at any time
+    Each mode folder has its own index.jsonl, one summary line per run.
+
+    out/runs/live/2026-11-10T14-32-07_lowpass-10000Hz_claude-haiku/
         run.json            manifest: request, spec, backend/model, environment,
                             per-iteration timing/usage/verdict, status, outputs
         request.txt         the verbatim command line
@@ -43,6 +50,8 @@ from importlib import metadata
 from pathlib import Path
 
 RUNS_DIR_ENV = "SPICE_AGENT_RUNS_DIR"
+# Backends that call a real model. A run on any other backend is "dry".
+LIVE_BACKENDS = frozenset({"gemini", "claude"})
 _SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.IGNORECASE)
 
 
@@ -134,9 +143,16 @@ class RunRecorder:
 
     @classmethod
     def start(cls, *, spec, backend: str, model: str, argv=None, settings=None,
-              runs_dir=None) -> "RunRecorder":
-        """Create the run folder and write the request, spec and a first manifest."""
-        runs_dir = Path(runs_dir) if runs_dir else default_runs_dir()
+              runs_dir=None, live: bool | None = None) -> "RunRecorder":
+        """
+        Create the run folder and write the request, spec and a first manifest.
+        The folder goes under <runs_dir>/live/ or <runs_dir>/dry/; `live`
+        defaults to whether `backend` calls a real model (LIVE_BACKENDS).
+        """
+        if live is None:
+            live = backend in LIVE_BACKENDS
+        mode = "live" if live else "dry"
+        runs_dir = (Path(runs_dir) if runs_dir else default_runs_dir()) / mode
         started = datetime.now().astimezone()
         base = (f"{started:%Y-%m-%dT%H-%M-%S}_{spec.filter_type}-{spec.target_hz:g}Hz_"
                 f"{_slug(backend)}-{_slug(model)}")
@@ -151,6 +167,7 @@ class RunRecorder:
         rec.manifest = {
             "run_id": root.name,
             "status": "running",
+            "mode": mode,
             "started_at": started.isoformat(timespec="seconds"),
             "request": {"argv": argv, "command_line": shlex.join(argv)},
             "spec": spec.to_dict(),
@@ -307,7 +324,7 @@ class RunRecorder:
         self._flush()
         index = self.root.parent / "index.jsonl"
         m = self.manifest
-        line = {k: m.get(k) for k in ("run_id", "started_at", "status", "backend", "model",
+        line = {k: m.get(k) for k in ("run_id", "started_at", "status", "mode", "backend", "model",
                                        "spec_text", "iterations_used", "duration_s")}
         line["path"] = self.root.name
         with open(index, "a", encoding="utf-8") as f:
