@@ -9,15 +9,7 @@ it fills this in, and the harness compiles it.
 from google.genai import types
 
 
-SIMULATE_CIRCUIT_TOOL = types.FunctionDeclaration(
-    name="simulate_circuit",
-    description=(
-        "Simulates a circuit via ngspice (AC sweep, 1 Hz to 1 MHz) and "
-        "checks it against the target filter spec given in the prompt. "
-        "Returns the actual simulated cutoff / centre frequency, other "
-        "measured metrics, and whether the spec passed."
-    ),
-    parameters={
+CIRCUIT_JSON_SCHEMA = {
         "type": "object",
         "properties": {
             "title": {"type": "string"},
@@ -56,5 +48,15 @@ SIMULATE_CIRCUIT_TOOL = types.FunctionDeclaration(
             },
         },
         "required": ["title", "components"],
-    },
+}
+
+SIMULATE_CIRCUIT_TOOL = types.FunctionDeclaration(
+    name="simulate_circuit",
+    description=(
+        "Simulates a circuit via ngspice (AC sweep, 1 Hz to 1 MHz) and "
+        "checks it against the target filter spec given in the prompt. "
+        "Returns the actual simulated cutoff / centre frequency, other "
+        "measured metrics, and whether the spec passed."
+    ),
+    parameters=CIRCUIT_JSON_SCHEMA,
 )

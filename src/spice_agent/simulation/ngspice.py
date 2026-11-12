@@ -11,12 +11,14 @@ agent can get about a broken circuit.
 import os
 import subprocess
 
+import numpy as np
 import pandas as pd
 
 from spice_agent.paths import require_ngspice
 
 
-def run_ngspice_ac(netlist_str: str, netlist_path: str, output_path: str) -> pd.DataFrame:
+def run_ngspice_ac(netlist_str: str, netlist_path: str, output_path: str,
+                   capture: dict | None = None) -> pd.DataFrame:
     """
     Write netlist to netlist_path, run ngspice in batch mode, return the
     raw AC sweep results as a DataFrame with columns:
@@ -38,6 +40,10 @@ def run_ngspice_ac(netlist_str: str, netlist_path: str, output_path: str) -> pd.
         capture_output=True,
         text=True,
     )
+    if capture is not None:
+        # For run logging: keep what ngspice said, success or not.
+        capture.update(ngspice_stdout=result.stdout, ngspice_stderr=result.stderr,
+                       ngspice_returncode=result.returncode)
 
     if not os.path.exists(output_path):
         # ngspice failed silently from our perspective (no output file) -
@@ -67,7 +73,8 @@ def run_ngspice_ac(netlist_str: str, netlist_path: str, output_path: str) -> pd.
     df = pd.DataFrame({
         "freq": raw[0],
         "gain_db": raw[1],
-        "phase_deg": raw[3],
+        # ngspice's vp() is in RADIANS (unless `set units=degrees`).
+        "phase_deg": np.degrees(raw[3]),
     })
     return df
 

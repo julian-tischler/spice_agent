@@ -45,6 +45,15 @@ def test_writes_a_png(name, sweeps, tmp_path):
     assert {"freq", "gain_db", "phase_deg"} <= set(df.columns)
 
 
+def test_phase_is_in_degrees(sweeps):
+    """RC low-pass: -45 deg at fc (1591 Hz), tending to -90 deg. Radians
+    would read -0.785 and -1.571."""
+    df = sweeps["lowpass"]
+    at_fc = df.iloc[(df["freq"] - 1591).abs().argmin()]["phase_deg"]
+    assert at_fc == pytest.approx(-45, abs=2)
+    assert df["phase_deg"].iloc[-1] < -80
+
+
 @pytest.mark.parametrize("name", list(CASES))
 def test_annotation_marks_the_right_feature(name, sweeps, tmp_path, monkeypatch):
     """The measured vertical line must land on this filter type's own

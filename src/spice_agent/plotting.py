@@ -9,6 +9,8 @@ no spec falls back to the lowpass annotation, which is what the original
 version always did.
 """
 
+import os
+
 import matplotlib
 matplotlib.use("Agg")  # no GUI backend needed, just save to file
 import matplotlib.pyplot as plt
@@ -82,12 +84,23 @@ def plot_bode(circuit_json: dict, save_path: str = "bode_plot.png",
     else:
         show_target = True
 
+    # Simulate the circuit as built (with the spec's technology parasitics),
+    # and for a non-ideal technology also the ideal one, to overlay.
     if df is None:
-        df = simulate_get_full_sweep(circuit_json)
+        df = simulate_get_full_sweep(circuit_json, technology=spec.technology)
+    df_ideal = None
+    if spec.technology != "ideal":
+        df_ideal = simulate_get_full_sweep(circuit_json, technology="ideal")
 
     fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 
-    ax_mag.semilogx(df["freq"], df["gain_db"], color="tab:blue")
+    tech_label = f"as built ({spec.technology})" if df_ideal is not None else None
+    if df_ideal is not None:
+        ax_mag.semilogx(df_ideal["freq"], df_ideal["gain_db"], color="gray",
+                        linestyle="-", linewidth=1.2, alpha=0.7, label="ideal components")
+        ax_phase.semilogx(df_ideal["freq"], df_ideal["phase_deg"], color="gray",
+                          linewidth=1.2, alpha=0.7)
+    ax_mag.semilogx(df["freq"], df["gain_db"], color="tab:blue", label=tech_label)
     measured = _annotate(ax_mag, df, spec)
     if show_target:
         ax_mag.axvline(spec.target_hz, color=TARGET, linestyle=":", linewidth=1.5,
@@ -103,11 +116,14 @@ def plot_bode(circuit_json: dict, save_path: str = "bode_plot.png",
         ax_phase.axvline(measured, color=MEASURED, linestyle="--", linewidth=1)
     if show_target:
         ax_phase.axvline(spec.target_hz, color=TARGET, linestyle=":", linewidth=1.5)
+    ax_phase.set_ylim(-180, 180)
+    ax_phase.set_yticks(range(-180, 181, 90))
     ax_phase.set_ylabel("Phase (deg)")
     ax_phase.set_xlabel("Frequency (Hz)")
     ax_phase.grid(True, which="both", alpha=0.3)
 
     fig.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
     if not quiet:

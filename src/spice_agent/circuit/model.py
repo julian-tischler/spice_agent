@@ -73,7 +73,7 @@ class AnalysisSpec:
                 "generator — only 'ac' is implemented in v1."
             )
         # vdb()/vp() are real-valued pseudo-vectors (dB magnitude, phase
-        # in degrees). Unlike v(node), which is complex during AC analysis,
+        # in radians - converted to degrees when parsed). Unlike v(node), which is complex during AC analysis,
         # these don't trigger wrdata's "repeat the x-column per vector"
         # behavior for complex data — so the output file has a single
         # shared frequency column, which is much simpler and more robust
@@ -191,7 +191,10 @@ class Circuit:
         self.validate()
         profile = get_profile(technology)
 
-        lines = [self.title]
+        # The title is free text from the model ("fc ≈ 9.95 kHz"). SPICE
+        # netlists are ASCII and the file is written in the platform's
+        # default encoding, so non-ASCII would crash the write on Windows.
+        lines = [self.title.encode("ascii", "replace").decode("ascii")]
         if profile.is_ideal:
             lines += [c.to_spice_line() for c in self.components]
         else:

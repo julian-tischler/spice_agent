@@ -9,6 +9,7 @@ against a scripted fake with no network.
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 
 from google import genai
@@ -18,26 +19,53 @@ from spice_agent.agent.analysis import analysis_for
 from spice_agent.agent.prompts import build_system_prompt
 from spice_agent.agent.rate_limit import RateLimiter, RetryPolicy
 from spice_agent.agent.tool_schema import SIMULATE_CIRCUIT_TOOL
+from spice_agent.runlog import RunRecorder
 from spice_agent.simulation import DesignSpec, simulate_and_verify
+
+
+def _raw_response(response):
+    """The model's reply as JSON-able data, for the run log."""
+    dump = getattr(response, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json", exclude_none=True)
+        except Exception:
+            pass
+    cand = response.candidates[0].content if getattr(response, "candidates", None) else None
+    return {"content": cand.model_dump(mode="json", exclude_none=True)
+            if hasattr(cand, "model_dump") else repr(response),
+            "text": getattr(response, "text", None)}
+
+
+def _gemini_usage(response) -> dict | None:
+    u = getattr(response, "usage_metadata", None)
+    if u is None:
+        return None
+    return {"input_tokens": getattr(u, "prompt_token_count", None),
+            "output_tokens": getattr(u, "candidates_token_count", None),
+            "total_tokens": getattr(u, "total_token_count", None)}
 
 
 MODEL_NAME = "gemini-3.5-flash"  # swap for a stronger model later if needed
 DEFAULT_MAX_ITERATIONS = 6
 
 
-def call_simulate_circuit_tool(args: dict, spec: DesignSpec) -> dict:
+def call_simulate_circuit_tool(args: dict, spec: DesignSpec, capture: dict | None = None) -> dict:
     """
     Executes the tool: attaches the fixed AC analysis block, runs the
     simulation, checks against the spec, returns the result dict.
+    `capture` (optional) collects the simulation artifacts for run logging.
     """
     circuit_json = {
         "title": args.get("title", "LLM-generated circuit"),
         "components": args["components"],
         "analysis": analysis_for(spec),
     }
+    if capture is not None:
+        capture["circuit_json"] = circuit_json
 
     try:
-        result = simulate_and_verify(circuit_json, spec)
+        result = simulate_and_verify(circuit_json, spec, capture=capture)
     except (ValueError, KeyError, TypeError) as e:
         # Circuit.validate() or malformed JSON — turn this into feedback
         # the model can act on, rather than crashing the loop.
@@ -69,6 +97,7 @@ def run_agent_loop(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     retry_policy: RetryPolicy | None = None,
     verbose: bool = True,
+    recorder: RunRecorder | None = None,
 ) -> AgentRunResult:
     """
     Run the design loop for `spec`. Returns an AgentRunResult whether or
@@ -84,6 +113,7 @@ def run_agent_loop(
         spec = DesignSpec()
 
     log = print if verbose else (lambda *a, **k: None)
+    recorder = recorder or RunRecorder.disabled()
 
     if client is None:
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -99,19 +129,25 @@ def run_agent_loop(
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    contents = [
-        types.Content(role="user", parts=[types.Part(text=build_system_prompt(spec))])
-    ]
+    system_prompt = build_system_prompt(spec)
+    recorder.set_system_prompt(system_prompt)
+    contents = [types.Content(role="user", parts=[types.Part(text=system_prompt)])]
     run = AgentRunResult(spec=spec, passed=False, iterations=0)
 
     for iteration in range(1, max_iterations + 1):
         run.iterations = iteration
         log(f"\n{'='*60}\nIteration {iteration}  [{spec.describe()}]\n{'='*60}")
 
+        t0 = time.monotonic()
         response = client.models.generate_content(
             model=model_name,
             contents=contents,
             config=config,
+        )
+        recorder.record_model_call(
+            iteration, raw=_raw_response(response), usage=_gemini_usage(response),
+            duration_s=time.monotonic() - t0,
+            command={"backend": "gemini", "model": model_name},
         )
 
         candidate_content = response.candidates[0].content
@@ -131,12 +167,15 @@ def run_agent_loop(
 
         # Handle each function call in this turn (usually just one)
         function_response_parts = []
-        for fc in function_calls:
+        for call_no, fc in enumerate(function_calls, start=1):
             args = dict(fc.args)
             log(f"Model proposed circuit: {json.dumps(args, indent=2)}")
 
-            result = call_simulate_circuit_tool(args, spec)
+            capture: dict = {}
+            result = call_simulate_circuit_tool(args, spec, capture=capture)
             log(f"Simulation result: {result}")
+            recorder.record_circuit(iteration, args, call=call_no)
+            recorder.record_simulation(iteration, capture, result, call=call_no)
 
             run.history.append({"iteration": iteration, "circuit": args, "result": result})
             run.final_result = result

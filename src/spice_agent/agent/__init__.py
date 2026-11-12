@@ -16,6 +16,7 @@ from spice_agent.agent.analysis import (
     PARASITIC_FSTOP,
     analysis_for,
 )
+from spice_agent.agent.claude_loop import run_claude_loop
 from spice_agent.agent.cli import export_design, main, parse_args, run_circuit_json
 from spice_agent.agent.loop import (
     DEFAULT_MAX_ITERATIONS,
@@ -51,4 +52,5 @@ __all__ = [
     "parse_args",
     "run_agent_loop",
     "run_circuit_json",
+    "run_claude_loop",
 ]

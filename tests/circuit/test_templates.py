@@ -252,3 +252,14 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_non_ascii_title_does_not_break_the_netlist():
+    """Models put things like '≈' in titles; that used to crash the netlist
+    write on Windows and surface as a bogus 'Circuit definition error'."""
+    from spice_agent.circuit import Circuit
+    from _support.circuits import RC_LOWPASS
+    circuit = Circuit.from_dict(dict(RC_LOWPASS, title="RC lowpass, fc ≈ 1.59 kHz"))
+    netlist = circuit.to_netlist(output_path="out.txt")
+    netlist.encode("ascii")                      # must be pure ASCII
+    assert netlist.splitlines()[0].startswith("RC lowpass, fc ")

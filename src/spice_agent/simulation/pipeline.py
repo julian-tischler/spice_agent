@@ -45,6 +45,7 @@ def simulate_and_verify(
     *,
     target_cutoff_hz: float | None = None,
     tolerance_pct: float = 10.0,
+    capture: dict | None = None,
 ) -> dict:
     """
     The full pipeline in one call: this is the function the agent loop
@@ -53,6 +54,9 @@ def simulate_and_verify(
     Pass a DesignSpec for any filter type. The keyword form
     simulate_and_verify(circuit, target_cutoff_hz=..., tolerance_pct=...)
     is kept for existing low-pass callers.
+
+    `capture`, if given, is filled with the artifacts of this simulation
+    (netlist, ngspice output, measured sweep) for run logging.
     """
     if spec is None:
         if target_cutoff_hz is None:
@@ -66,9 +70,14 @@ def simulate_and_verify(
         output_path = os.path.join(tmpdir, "output.txt")
         netlist_str = circuit.to_netlist(output_path=output_path,
                                          technology=spec.technology)
+        if capture is not None:
+            capture["netlist"] = netlist_str
+            if spec.technology != "ideal":
+                capture["netlist_ideal"] = circuit.to_netlist(output_path=output_path,
+                                                              technology="ideal")
 
         try:
-            raw_df = run_ngspice_ac(netlist_str, netlist_path, output_path)
+            raw_df = run_ngspice_ac(netlist_str, netlist_path, output_path, capture)
         except SimulationError as e:
             return {
                 "passed": False,
@@ -78,6 +87,8 @@ def simulate_and_verify(
             }
 
     metrics_df = compute_ac_metrics(raw_df)
+    if capture is not None:
+        capture["sweep"] = metrics_df
     result = check_filter_spec(metrics_df, spec)
     result["simulation_failed"] = False
     return result
