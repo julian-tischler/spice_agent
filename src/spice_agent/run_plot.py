@@ -20,6 +20,7 @@ stopband region the response must stay out of.
 
 import argparse
 import json
+import textwrap
 import math
 from pathlib import Path
 
@@ -29,7 +30,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.patches import Rectangle
 
-from spice_agent.simulation import DesignSpec
+from spice_agent.simulation import DesignSpec, metrics
 
 # Ordinal blue ramp, light -> dark; first step chosen to clear 2:1 on the
 # light surface (dataviz reference palette, steps 250..700).
@@ -42,6 +43,7 @@ MUTED = "#898781"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 REQUIREMENT = "#898781"
+NOT_JUDGED = "#e1e0d9"
 GOOD = "#006300"            # success text ink, used with a "PASS" label
 
 PREFIX = {"resistor": "R", "capacitor": "C", "inductor": "L"}
@@ -71,11 +73,12 @@ def load_run(run_dir) -> dict:
     iterations = []
     for d in sorted(run_dir.glob("iter_*")):
         sweep, circuit, result = d / "sweep.csv", d / "circuit.json", d / "result.json"
-        if not (sweep.is_file() and circuit.is_file()):
-            continue        # e.g. a reply that was not a circuit: nothing to draw
+        if not circuit.is_file():
+            continue        # a reply that was not a circuit: nothing to show
         iterations.append({
             "n": int(d.name.split("_")[1]),
-            "sweep": pd.read_csv(sweep),
+            # None for a resubmitted design: answered, not simulated again
+            "sweep": pd.read_csv(sweep) if sweep.is_file() else None,
             "circuit": json.loads(circuit.read_text(encoding="utf-8")),
             "result": (json.loads(result.read_text(encoding="utf-8"))
                        if result.is_file() else {}),
@@ -115,8 +118,11 @@ def metric_rows(spec: DesignSpec, iterations: list[dict]) -> tuple[list[str], li
         row("cutoff", lambda r: _fmt_hz(r.get("cutoff_hz")))
     elif spec.filter_type == "bandpass":
         row("centre", lambda r: _fmt_hz(r.get("center_hz")))
+        row("bandwidth", lambda r: _fmt_hz(r.get("bandwidth_hz")))
     else:
         row("notch", lambda r: _fmt_hz(r.get("notch_hz")))
+        row("depth", lambda r: "-" if r.get("notch_depth_db") is None
+            else f"{r['notch_depth_db']:.1f} dB")
     if spec.stopband_hz is not None:
         row(f"atten @ {_fmt_hz(spec.stopband_hz)}",
             lambda r: "-" if r.get("stopband_edge_atten_db") is None
@@ -124,13 +130,30 @@ def metric_rows(spec: DesignSpec, iterations: list[dict]) -> tuple[list[str], li
         row("worst in stopband",
             lambda r: "-" if r.get("stopband_atten_db") is None
             else f"{r['stopband_atten_db']:.1f} dB @ {_fmt_hz(r.get('stopband_worst_hz'))}")
+    if spec.filter_type != "bandpass":
+        row("peaking", lambda r: "-" if r.get("passband_peaking_db") is None
+            else f"{r['passband_peaking_db']:+.1f} dB")
     row("verdict", lambda r: "PASS" if r.get("passed") else
-        ("sim failed" if r.get("simulation_failed") else "fail"))
+        ("sim failed" if r.get("simulation_failed") else
+         f"repeat of {r['repeat_of']}" if r.get("repeated_design") else "fail"))
     return labels, cells
 
 
 def _draw_requirement(ax, spec: DesignSpec, f_lo: float, f_hi: float,
                       passband_db: float, y_top: float, y_bottom: float) -> None:
+    w_lo, w_hi = spec.judge_window(f_lo, f_hi)
+    first = True
+    for a, b in ((f_lo, w_lo), (w_hi, f_hi)):
+        if b > a * (1 + 1e-9):
+            ax.axvspan(a, b, color=NOT_JUDGED, alpha=0.55, linewidth=0, zorder=0,
+                       label="not judged (outside the judged range)" if first else None)
+            first = False
+    if spec.max_peaking_db is not None and spec.filter_type != "bandpass":
+        span = {"lowpass": (w_lo, spec.target_hz), "highpass": (spec.target_hz, w_hi)}.get(
+            spec.filter_type, (w_lo, w_hi))
+        ax.plot(list(span), [passband_db + spec.max_peaking_db] * 2, color=INK_2,
+                linestyle="--", linewidth=1.0,
+                label=f"peaking limit: +{spec.max_peaking_db:g} dB")
     tol = spec.target_hz * spec.tolerance_pct / 100
     ax.axvspan(spec.target_hz - tol, spec.target_hz + tol, color=REQUIREMENT,
                alpha=0.12, linewidth=0, label=f"target {_fmt_hz(spec.target_hz)} "
@@ -138,10 +161,7 @@ def _draw_requirement(ax, spec: DesignSpec, f_lo: float, f_hi: float,
     ax.axvline(spec.target_hz, color=REQUIREMENT, linestyle=":", linewidth=1.2)
     if spec.stopband_hz is None:
         return
-    end = spec.stopband_end_hz
-    if end is None:
-        end = f_hi if spec.filter_type == "lowpass" else f_lo
-    lo, hi = sorted((spec.stopband_hz, end))
+    lo, hi = sorted((spec.stopband_hz, spec.stopband_end(f_lo, f_hi)))
     limit = passband_db - spec.stopband_atten_db
     ax.add_patch(Rectangle((lo, limit), hi - lo, y_top - limit, facecolor=REQUIREMENT,
                            alpha=0.14, hatch="//", edgecolor=REQUIREMENT, linewidth=0,
@@ -159,7 +179,7 @@ def plot_run_history(run_dir, save_path=None, *, quiet: bool = False) -> Path:
     run_dir = Path(run_dir)
     run = load_run(run_dir)
     spec, iterations = run["spec"], run["iterations"]
-    if not iterations:
+    if not any(it["sweep"] is not None for it in iterations):
         raise ValueError(f"{run_dir} has no simulated iterations to plot")
     save_path = Path(save_path) if save_path else run_dir / "history.png"
 
@@ -183,16 +203,20 @@ def plot_run_history(run_dir, save_path=None, *, quiet: bool = False) -> Path:
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
 
-    f_lo = min(float(it["sweep"]["freq"].iloc[0]) for it in iterations)
-    f_hi = max(float(it["sweep"]["freq"].iloc[-1]) for it in iterations)
-    gains = pd.concat([it["sweep"]["gain_db"] for it in iterations])
+    drawn = [it for it in iterations if it["sweep"] is not None]
+    f_lo = min(float(it["sweep"]["freq"].iloc[0]) for it in drawn)
+    f_hi = max(float(it["sweep"]["freq"].iloc[-1]) for it in drawn)
+    gains = pd.concat([it["sweep"]["gain_db"] for it in drawn])
     y_top = max(5.0, float(gains.max()) + 5)
     y_bottom = max(-150.0, float(gains.min()) - 5)
-    last = iterations[-1]["sweep"]
-    passband_db = float(last["gain_db"].iloc[0 if spec.filter_type == "lowpass" else -1])
+    w_lo, w_hi = spec.judge_window(f_lo, f_hi)
+    last = drawn[-1]["sweep"]
+    passband_db = metrics.gain_at(last, w_hi if spec.filter_type == "highpass" else w_lo)
     _draw_requirement(ax_mag, spec, f_lo, f_hi, passband_db, y_top, y_bottom)
 
     for i, (it, color) in enumerate(zip(iterations, colors)):
+        if it["sweep"] is None:
+            continue
         df, final = it["sweep"], i == len(iterations) - 1
         lw = 2.4 if final else 1.4
         verdict = "PASS" if it["result"].get("passed") else "fail"
@@ -203,7 +227,7 @@ def plot_run_history(run_dir, save_path=None, *, quiet: bool = False) -> Path:
 
     # Direct labels at the right edge; curves ending within a few dB of each
     # other share one label ("1,2") instead of printing on top of each other.
-    ends = sorted(((float(it["sweep"]["gain_db"].iloc[-1]), it["n"]) for it in iterations),
+    ends = sorted(((float(it["sweep"]["gain_db"].iloc[-1]), it["n"]) for it in drawn),
                   reverse=True)
     groups: list[list] = []
     for y, n in ends:
@@ -223,7 +247,7 @@ def plot_run_history(run_dir, save_path=None, *, quiet: bool = False) -> Path:
     ax_mag.set_ylabel("Gain (dB)")
     ax_mag.tick_params(labelbottom=False)
     status = run["manifest"].get("status", "?")
-    title = (f"{spec.describe()}  [{spec.technology}]\n"
+    title = ("\n".join(textwrap.wrap(f"{spec.describe()}  [{spec.technology}]", 130)) + "\n"
              f"{run['manifest'].get('backend', '?')}/{run['manifest'].get('model', '?')}"
              f" - {len(iterations)} iteration(s), {status}")
     ax_mag.set_title(title, fontsize=9.5, color=INK, loc="left")

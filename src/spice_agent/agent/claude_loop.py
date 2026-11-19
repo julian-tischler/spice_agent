@@ -31,7 +31,14 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from spice_agent.agent.loop import AgentRunResult, call_simulate_circuit_tool, feedback_text
+from spice_agent.agent.loop import (
+    MAX_CONSECUTIVE_REPEATS,
+    AgentRunResult,
+    RepeatGuard,
+    call_simulate_circuit_tool,
+    feedback_text,
+    repeated_result,
+)
 from spice_agent.agent.prompts import build_system_prompt
 from spice_agent.agent.tool_schema import CIRCUIT_JSON_SCHEMA
 from spice_agent.runlog import RunRecorder
@@ -190,6 +197,7 @@ def run_claude_loop(
     binary: str | None = None,
     verbose: bool = True,
     recorder: RunRecorder | None = None,
+    diagnose: str = "full",
 ) -> AgentRunResult:
     """
     Run the design loop for `spec` through `claude -p`. Returns an
@@ -204,6 +212,7 @@ def run_claude_loop(
     binary = binary or (find_claude() if runner is _run_cli else "claude")
 
     session_id = str(uuid.uuid4())
+    guard = RepeatGuard()
     tally = UsageTally()
     run = AgentRunResult(spec=spec, passed=False, iterations=0)
     system_prompt = build_system_prompt(spec)
@@ -243,7 +252,13 @@ def run_claude_loop(
 
             log(f"Model proposed circuit: {json.dumps(args, indent=2)}")
             capture: dict = {}
-            result = call_simulate_circuit_tool(args, spec, capture=capture)
+            earlier = guard.check(args)
+            if earlier:
+                result = repeated_result(earlier, guard)
+            else:
+                result = call_simulate_circuit_tool(args, spec, capture=capture,
+                                                    diagnose=diagnose)
+                guard.remember(iteration, args, result)
             log(f"Simulation result: {result}")
             recorder.record_circuit(iteration, args)
             recorder.record_simulation(iteration, capture, result)
@@ -255,6 +270,12 @@ def run_claude_loop(
             if result.get("passed"):
                 run.passed = True
                 log(f"\nPASS: spec met after {iteration} iteration(s).")
+                break
+            if guard.stalled:
+                run.stalled = True
+                run.final_text = (f"stalled: an already-simulated design was resubmitted "
+                                  f"{MAX_CONSECUTIVE_REPEATS} times in a row")
+                log(f"\nSTALLED: {run.final_text}")
                 break
             prompt = feedback_text(result) + "\nPropose a corrected circuit (JSON only)."
         else:

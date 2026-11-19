@@ -27,6 +27,7 @@ from spice_agent.agent.rate_limit import RetryPolicy
 from spice_agent.circuit import PROFILES
 from spice_agent.runlog import RunRecorder
 from spice_agent.simulation import DesignSpec
+from spice_agent.simulation.spec import DEFAULT_MAX_PEAKING_DB
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -50,10 +51,30 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="lowpass/highpass: dB of attenuation below passband required "
                         "at --stopband-hz (forces a higher-order topology)")
     p.add_argument("--stopband-end", type=float, default=None, metavar="HZ",
-                   help="lowpass/highpass: far edge of the stopband. Default: the end "
-                        "of the sweep (1 MHz ideal, 100 MHz with a non-ideal "
-                        "--technology, where stray coupling may make the far end "
-                        "unreachable)")
+                   help="lowpass/highpass: far edge of the stopband. Default: the edge "
+                        "of the judged range (see --judge-lo/--judge-hi)")
+    jd = p.add_argument_group(
+        "what is judged (defaults: 2 decades either side of --target, 3 dB peaking, "
+        "ideal source, no load)")
+    jd.add_argument("--judge-lo", type=float, default=None, metavar="HZ",
+                    help="lowest frequency that is judged; below it the response is "
+                         "reported but cannot fail the design (default target/100)")
+    jd.add_argument("--judge-hi", type=float, default=None, metavar="HZ",
+                    help="highest frequency that is judged (default target*100); the "
+                         "sweep is extended to cover it")
+    jd.add_argument("--max-peaking", default=str(DEFAULT_MAX_PEAKING_DB), metavar="DB",
+                    help="max passband gain above its level, dB, or 'off' "
+                         f"(default {DEFAULT_MAX_PEAKING_DB:g})")
+    jd.add_argument("--source-ohm", type=float, default=0.0, metavar="OHM",
+                    help="source resistance the harness puts between V1 and 'in' "
+                         "(default 0 = ideal source); the model cannot change it")
+    jd.add_argument("--load-ohm", type=float, default=None, metavar="OHM",
+                    help="load resistance the harness puts from 'out' to ground "
+                         "(default: none, 'out' unloaded); the model cannot change it")
+    p.add_argument("--diagnosis", choices=["full", "basic", "off"], default="full",
+                   help="parasitics diagnosis of failed non-ideal designs: full (default; "
+                        "includes the per-component check, a few seconds per iteration), "
+                        "basic (quicker, no per-component check) or off")
     p.add_argument("--backend", choices=["gemini", "claude"], default="gemini",
                    help="gemini: Gemini API (needs GEMINI_API_KEY). claude: Claude Code "
                         "headless mode (`claude -p`) on your Claude subscription")
@@ -89,6 +110,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _peaking_arg(text: str) -> float | None:
+    if str(text).strip().lower() in ("off", "none"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        raise SystemExit(f"--max-peaking must be a number of dB or 'off', not {text!r}")
+
+
 def main(argv=None) -> int:
     a = parse_args(argv)
     spec = DesignSpec(
@@ -101,12 +131,18 @@ def main(argv=None) -> int:
         stopband_atten_db=a.stopband_atten,
         stopband_end_hz=a.stopband_end,
         technology=a.technology,
+        judge_lo_hz=a.judge_lo,
+        judge_hi_hz=a.judge_hi,
+        max_peaking_db=_peaking_arg(a.max_peaking),
+        source_ohm=a.source_ohm,
+        load_ohm=a.load_ohm,
     )
     argv_used = list(argv) if argv is not None else None
     if a.backend == "claude":
         model = a.model or CLAUDE_MODEL
         iterations = a.max_iterations or DEFAULT_CLAUDE_ITERATIONS
-        settings = {"effort": a.effort, "max_iterations": iterations}
+        settings = {"effort": a.effort, "max_iterations": iterations,
+                    "diagnosis": a.diagnosis}
     else:
         model = a.model or MODEL_NAME
         iterations = a.max_iterations or DEFAULT_MAX_ITERATIONS
@@ -115,7 +151,8 @@ def main(argv=None) -> int:
             max_retries=a.max_retries,
             initial_backoff_s=a.initial_backoff,
         )
-        settings = {"max_iterations": iterations, "retry_policy": policy}
+        settings = {"max_iterations": iterations, "retry_policy": policy,
+                    "diagnosis": a.diagnosis}
 
     recorder = (RunRecorder.disabled() if a.no_log else
                 RunRecorder.start(spec=spec, backend=a.backend, model=model,
@@ -126,10 +163,12 @@ def main(argv=None) -> int:
     with recorder:
         if a.backend == "claude":
             run = run_claude_loop(spec, model_name=model, effort=a.effort,
-                                  max_iterations=iterations, recorder=recorder)
+                                  max_iterations=iterations, recorder=recorder,
+                                  diagnose=a.diagnosis)
         else:
             run = run_agent_loop(spec, model_name=model, max_iterations=iterations,
-                                 retry_policy=policy, recorder=recorder)
+                                 retry_policy=policy, recorder=recorder,
+                                 diagnose=a.diagnosis)
         recorder.finish(run)
         if recorder.enabled:
             _plot_history(recorder)
@@ -202,6 +241,7 @@ def export_design(run: AgentRunResult, asc_path=None, cir_path=None, plot_path=N
         # Non-ideal technology exports the as-built circuit, so the
         # files describe what was simulated, not the ideal design.
         info.update(export(circuit_json, asc_path=asc_path, cir_path=cir_path,
+                           source_ohm=run.spec.source_ohm, load_ohm=run.spec.load_ohm,
                            technology=run.spec.technology))
         for key in ("asc", "cir"):
             if key in info:

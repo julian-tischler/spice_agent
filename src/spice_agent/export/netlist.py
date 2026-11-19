@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from spice_agent.circuit import (
     COMPONENT_PREFIXES,
+    EXTERNAL_IDS,
     Circuit,
     Component,
     expand_with_parasitics,
@@ -50,6 +51,7 @@ def as_built_circuit(circuit: Circuit, technology) -> Circuit:
         circuit.components, profile,
         input_node=circuit.input_node(),
         output_node=circuit.analysis.output_node,
+        ideal_ids=EXTERNAL_IDS,
     )
     by_prefix = {v: k for k, v in COMPONENT_PREFIXES.items()}
 
@@ -65,7 +67,8 @@ def as_built_circuit(circuit: Circuit, technology) -> Circuit:
             value=" ".join(value),
         ))
     return Circuit(title=f"{circuit.title} (as built: {profile.name})",
-                   components=components, analysis=circuit.analysis)
+                   components=components, analysis=circuit.analysis,
+                   terminations_applied=circuit.terminations_applied)
 
 
 def to_ltspice_netlist(circuit: Circuit, include_print: bool = True,

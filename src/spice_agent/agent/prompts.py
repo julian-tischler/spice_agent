@@ -6,7 +6,7 @@ the exact text sent can be asserted in a test.
 """
 
 from spice_agent.agent.analysis import analysis_for
-from spice_agent.circuit import get_profile
+from spice_agent.circuit import LOAD_ID, SOURCE_ID, SOURCE_NODE, get_profile
 from spice_agent.simulation import DesignSpec
 
 
@@ -49,6 +49,34 @@ TOPOLOGY_HINTS = {
 }
 
 
+def build_termination_note(spec: DesignSpec) -> str:
+    """
+    What surrounds the filter. The harness, not the model, owns the source
+    and load: with none set the source is ideal and 'out' is unloaded, and
+    the ladder tables in the hint would give an undamped, peaking filter -
+    so the model is told so rather than left to find out from the verdict.
+    """
+    if not spec.terminated:
+        return (
+            "- SOURCE/LOAD: 'in' is driven by an ideal voltage source (0 ohm) and "
+            "'out' is not loaded. Textbook LC ladder values (g_k tables) assume "
+            "resistive terminations R0 at the ends; without them an LC filter is "
+            "undamped and peaks in the passband, so include your own terminating / "
+            "damping resistance if you use such a table.\n"
+        )
+    src = f"{spec.source_ohm:g} ohm" if spec.source_ohm > 0 else "an ideal (0 ohm)"
+    load = (f"a {spec.load_ohm:g} ohm resistor from 'out' to ground"
+            if spec.load_ohm is not None else "nothing (unloaded)")
+    return (
+        f"- SOURCE/LOAD (fixed by the test harness, do NOT add them yourself): "
+        f"V1 drives 'in' through {src} source resistance, and 'out' is loaded by "
+        f"{load}. Design for these terminations - e.g. use them as R0 in ladder "
+        f"tables. Do not use the ids {SOURCE_ID}/{LOAD_ID} or the node "
+        f"'{SOURCE_NODE}'. The passband level is whatever the source/load divider "
+        f"gives; the checks are relative to it.\n"
+    )
+
+
 def build_technology_note(spec: DesignSpec) -> str:
     """
     Tell the model how the circuit will be built, when that matters.
@@ -80,12 +108,15 @@ def build_system_prompt(spec: DesignSpec) -> str:
 (resistors, capacitors, inductors only) meeting this spec:
 
 - {spec.describe()}
-- Unity passband gain (0 dB) — do not add a resistive divider in the passband
+- {"Do not add loss beyond the given source/load divider" if spec.terminated else "Unity passband gain (0 dB) — do not add a resistive divider in the passband"}
 - Topology: single voltage source 'V1' (nodes ['in','0'], value 'AC 1'), \
 then passives forming the filter from node 'in' to node 'out' (node '0' is ground)
 - The simulation sweeps {analysis['fstart']} Hz to {analysis['fstop']}; \
 the target frequency must land well inside that range.
-{build_technology_note(spec)}
+- Judged from {spec.judge_window()[0]:g} Hz to {spec.judge_window()[1]:g} Hz: \
+every requirement is checked inside that range; the response outside it is \
+reported to you but cannot fail the design.
+{build_termination_note(spec)}{build_technology_note(spec)}
 Hint: {TOPOLOGY_HINTS[spec.filter_type]}
 
 Call the simulate_circuit tool with your proposed component values. You'll \

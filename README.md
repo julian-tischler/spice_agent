@@ -117,16 +117,56 @@ disagree.
 | `min_notch_depth_db` | `20.0` | notch only: minimum depth below passband |
 | `stopband_hz` | `None` | LP/HP: edge of the stopband nearest the passband |
 | `stopband_atten_db` | `None` | LP/HP: minimum attenuation across that stopband |
-| `stopband_end_hz` | `None` | LP/HP: far edge (`--stopband-end`); defaults to the end of the sweep |
+| `stopband_end_hz` | `None` | LP/HP: far edge (`--stopband-end`); defaults to the judged-window edge |
 | `technology` | `"ideal"` | `ideal`, `smd_pcb` or `breadboard` |
+| `judge_lo_hz` / `judge_hi_hz` | `None` | the judged range (`--judge-lo/--judge-hi`); default two decades either side of the target |
+| `max_peaking_db` | `3.0` | max passband gain above its level (`--max-peaking`, `off` = `None`); not for bandpass |
+| `source_ohm` | `0.0` | source resistance the harness inserts before `in` (`--source-ohm`) |
+| `load_ohm` | `None` | load resistance the harness puts on `out` (`--load-ohm`); `None` = unloaded |
 
 `describe()` renders it as the line the model actually reads:
 
 ```python
 >>> DesignSpec("lowpass", 10_000, stopband_hz=100_000, stopband_atten_db=40).describe()
 'lowpass filter, cutoff frequency (-3dB point) 10000 Hz (+/-10%);
- at least 40 dB below passband above 100000 Hz'
+ at least 40 dB below passband everywhere from 100000 Hz to 1e+06 Hz;
+ passband may not peak more than 3 dB above its level'
 ```
+
+### What is judged: the window
+
+Every check is made inside a **judged window**, by default two decades
+either side of the target (10 kHz → 100 Hz – 1 MHz), and the sweep always
+covers it. That includes the passband reference, the bandpass and notch shape
+checks, the peaking check and, unless `--stopband-end` says otherwise, the
+stopband. What the response does *outside* the window is reported to the
+model and the user ("not judged: above 5 MHz the response sags to −18 dB
+at 100 MHz"), but it cannot fail a design.
+
+The reason is that the user asked for a filter at the target. Three decades
+away, a breadboard's parasitics dominate whatever was designed: an inductor
+there is a 15 pF capacitor. Judging that by default rejected good designs.
+Live, a −50 dB notch exactly on 50 kHz was rejected because its gain at
+100 MHz was −19 dB. Someone who does care about 100 MHz says so, with
+`--judge-hi 1e8` (or an explicit `--stopband-end`, which widens the window
+to include it), and the sweep is extended to match.
+
+### The world around the filter: source and load
+
+By default the filter is driven by an **ideal voltage source (0 Ω)** and
+`out` is **unloaded**. The harness adds nothing that was not asked for.
+Real filters sit between a source with some output resistance and a load, and
+those resistances do the damping. Textbook ladder tables (the `g_k` values in
+the lowpass hint) assume them: a Butterworth ladder computed for a 1 kΩ source
+peaks +3.9 dB and misses its cutoff by 8.6% when driven from an ideal one.
+
+`--source-ohm` and `--load-ohm` (`source_ohm` / `load_ohm`) make the
+surroundings part of the requirement. The harness inserts `R_SOURCE` between
+`V1` and `in` and `R_LOAD` from `out` to ground. Both are ideal, never get
+parasitics, and are written into the exported `.cir`/`.asc`. They are
+reserved, so the model cannot add, remove or change them, and the prompt
+tells it they are there. All checks are relative to the resulting passband
+level, so a 50 Ω / 50 Ω ladder's −6.02 dB passband is correct, not a failure.
 
 ### Why the stopband term matters
 
@@ -156,11 +196,25 @@ worst point. A single-frequency check can be satisfied by a response that dips
 there and recovers — which is exactly what an inductor's self-resonance does —
 so a filter could pass while being useless either side of the sample.
 
+### Passband peaking
+
+The passband may not rise more than `max_peaking_db` (default **3 dB**) above
+its own level, which catches undamped resonances. This used to be unchecked,
+and a live run passed with **+12 dB** of peaking: the undamped L-C in
+`out/runs/live/2026-11-12T15-31-54_lowpass-10000Hz_claude-haiku/` (see its
+`history.png`). Re-judged today, it fails. The limit is loose on purpose
+(Chebyshev-style ripple still passes); tighten it with `--max-peaking 0.5` or
+switch it off with `--max-peaking off`. Bandpass has no peaking check, because
+its passband *is* the peak.
+
 ### What is *not* checked
 
-`technology` and the spec fields above are enforced. The prompt also asks for
-unity passband gain, and **nothing verifies that** — a design sitting at −6 dB
-would satisfy every check. Phase is simulated and plotted but never judged.
+The absolute passband level is not checked: the prompt asks for unity gain
+(when unterminated), but a design sitting at −6 dB still satisfies every check,
+because everything is judged relative to the passband. Phase is simulated and
+plotted but never judged. A notch has no width requirement, so a notch so
+wide that the window edges sit on its skirts is judged against a passband that
+is already attenuated.
 
 ---
 
@@ -185,6 +239,17 @@ python -m spice_agent.agent --type lowpass --target 10000 \
     --asc out/designs/d.asc --cir out/designs/d.cir --plot out/plots/d.png
 ```
 
+What is judged, and around what:
+
+| Flag | Default | |
+|---|---|---|
+| `--judge-lo HZ` / `--judge-hi HZ` | target ÷ 100 / × 100 | the judged range |
+| `--stopband-end HZ` | window edge | far edge of a lowpass/highpass stopband |
+| `--max-peaking DB` | `3` | passband peaking limit, or `off` |
+| `--source-ohm OHM` | `0` (ideal source) | fixed source resistance |
+| `--load-ohm OHM` | none (unloaded) | fixed load resistance |
+| `--diagnosis full\|basic\|off` | `full` | parasitics diagnosis of failed non-ideal designs |
+
 `--max-iterations` caps the budget (default 6 for Gemini, 5 for Claude) and
 `--model` overrides the model (default `gemini-3.5-flash` / `haiku`).
 `--min-interval`, `--max-retries` and `--initial-backoff` control Gemini API
@@ -194,7 +259,8 @@ fails fast rather than burning the retry budget on waits that cannot succeed.
 ### Use a Claude subscription instead of the Gemini API
 
 ```bash
-python -m spice_agent.agent --backend claude --type lowpass --target 10000 \n    --stopband-hz 100000 --stopband-atten 40
+python -m spice_agent.agent --backend claude --type lowpass --target 10000 \
+    --stopband-hz 100000 --stopband-atten 40
 ```
 
 `claude -p` has no native function calling here, so the model is forced to
@@ -245,7 +311,8 @@ re-simulated. Curves go from light (first attempt) to dark (latest). The
 grey zones are the target cutoff band and the stopband region the response
 must stay out of. The table underneath lists each component position per
 iteration, with identical parallel parts collapsed (`20x 30n`), and what each
-iteration measured. To redraw it for any existing run:
+iteration measured. The region outside the judged window is greyed out and
+the peaking limit drawn as a dashed line. To redraw it for any existing run:
 
 ```bash
 python -m spice_agent.run_plot out/runs/live/<run-folder>
@@ -262,7 +329,8 @@ leaves a readable record. Environment variables whose names contain `KEY`,
 
 ```bash
 python -m spice_agent.agent --type lowpass --target 500000 \
-    --stopband-hz 5000000 --stopband-atten 40 --technology breadboard
+    --stopband-hz 5000000 --stopband-atten 40 --technology breadboard \
+    --source-ohm 1000
 ```
 
 With a non-ideal technology, each ideal component is expanded into its
@@ -270,19 +338,23 @@ parasitic equivalent before simulation, and the sweep extends to 100 MHz
 because parasitics are invisible below roughly 1 MHz. The model is told which
 technology it is designing for and the self-resonance guidance that implies.
 
-Without `--stopband-end`, the stopband then runs all the way to that 100 MHz
-sweep end. Bound it to the band that actually matters, for example
-`--stopband-end 10000000`; otherwise the breadboard's input–output stray
-coupling can make the far end unreachable for any passive design.
+The stopband is still judged only inside the window (here up to 50 MHz,
+two decades above 500 kHz). Add `--judge-hi 1e8` to hold the design to
+100 MHz.
 
-The difference is not subtle. A textbook-correct 3rd-order Butterworth for
-500 kHz, simulated three ways:
+The difference is not subtle. A textbook 3rd-order Butterworth L-C-L for
+500 kHz (318.3 µH, 636.6 pF, 318.3 µH, 1 kΩ load), simulated three ways with
+the 1 kΩ source it was designed for:
 
 | | passband | cutoff | worst stopband attenuation | verdict |
 |---|---|---|---|---|
-| `ideal` | +0.00 dB | 542 kHz | 66.0 dB at 5 MHz | **pass** |
-| `smd_pcb` | −0.09 dB | 540 kHz | 43.8 dB at 57.5 MHz | pass |
-| `breadboard` | −0.09 dB | 528 kHz | **19.0 dB** at 24 MHz | **fail** |
+| `ideal` | −6.02 dB | 500 kHz | 60.0 dB at 5 MHz | **pass** |
+| `smd_pcb` | −6.07 dB | 495 kHz | 40.9 dB at 39.8 MHz | pass |
+| `breadboard` | −6.07 dB | 482 kHz | **18.1 dB** at 8.3 MHz | **fail** |
+
+Without the source resistance the same ladder peaks +3.9 dB and lands at
+543 kHz (+8.6%). It fails the default peaking limit even with ideal parts,
+because it was designed for a termination it does not get.
 
 The design is textbook-right and unbuildable on a breadboard: its 318 µH
 inductors self-resonate at 2.30 MHz, below the 5 MHz where the requirement
@@ -307,13 +379,39 @@ log keeps full precision). Depending on what failed, the message carries:
   edge was short as well.
 - **The shape of the band:** attenuation at the edge, at each decade, at the
   far end and at the worst point.
-- **Parasitics diagnosis** (non-ideal technology only): a few extra local
-  simulations, no model tokens. Would the same design pass with ideal parts?
-  Which parasitic group costs the most, measured both on its own and by
-  removing it from the full model, and what helps against it? Which inductors and capacitors self-resonate inside the stopband? For
-  the textbook 10 kHz ladder on a breadboard it finds that the 2 pF input–output
-  coupling alone takes the stopband from 67.5 to 1.5 dB, because the ladder
-  ends in a series inductor and `out` has no shunt path to ground.
+- **Peaking:** how far the passband rises, where, and why. With an ideal
+  source and no load, nothing damps an L-C section.
+- **Everything, always.** A failed shape check no longer hides the rest: centre,
+  bandwidth, depth, peaking and stopband are all reported in every result.
+- **Outside the window:** notable behaviour beyond the judged range, marked as
+  not judged.
+- **Repeated design:** a circuit identical to an earlier one (ignoring ids,
+  order and title) is not simulated again. The model is told so, along with
+  that attempt's verdict. A second repeat in a row ends the run with status
+  `stalled`; live, a model once resubmitted the same bandpass three times.
+- **Parasitics diagnosis** (non-ideal technology only, `--diagnosis`): extra
+  local simulations, no model tokens.
+  - **Design or construction?** Failed checks that ideal parts would *also*
+    fail are named as design problems and never blamed on parasitics.
+  - **Per parasitic group:** for a construction failure, which group costs the
+    most, measured both on its own and by removing it from the full model,
+    and what helps against it. For the textbook 10 kHz ladder judged to
+    100 MHz on a breadboard, the 2 pF input–output coupling alone takes the
+    stopband from 67.5 to 1.5 dB. Losses (inductor winding resistance, ESR,
+    contact resistance) are a group too, measured against a lossless run. In
+    a live 10 Ω lowpass, a 210 µH inductor's 4.35 Ω winding resistance pulled
+    the cutoff from 10 kHz to 6 kHz, and the message quotes each inductor's
+    resistance.
+  - **Per component** (`full`, the default): each part, or each group of
+    identical parallel parts, is made ideal on its own while the rest stays as
+    built. The message then names the part to change: on the live 100 kHz
+    bandpass, "L1 (100u) alone would make the design PASS".
+  - **Self-resonances** of the parts inside the judged band.
+
+  `basic` skips the per-component check for quicker runs, and `off` skips
+  the diagnosis. Its cost is logged as `duration_s`: about 1.5 s per failed
+  iteration on a 3-part breadboard filter. It describes what is wrong and
+  where, and never proposes values; that stays the model's job.
 
 ### Verify a circuit without an LLM
 
@@ -379,12 +477,12 @@ open is what was simulated — parasitics and all. On the breadboard profile a
 ## Testing
 
 ```bash
-python -m pytest -m "not live"   # 241 tests, needs only ngspice  (~55 s)
+python -m pytest -m "not live"   # 307 tests, needs only ngspice  (~75 s)
 python -m pytest -m ltspice      #  15 tests, drives LTspice.exe
 python -m pytest -m live         #   5 tests, calls Gemini; needs an API key
 ```
 
-246 total (the 15 LTspice tests are part of the "not live" set). The Claude
+312 total (the 15 LTspice tests are part of the "not live" set). The Claude
 backend is tested against a scripted runner, so no test calls `claude`. The LTspice and live tests skip themselves when the binary or the
 key is missing, so `python -m pytest` works on a bare checkout.
 
@@ -407,8 +505,15 @@ complains about. Adding them means a second analysis path and a second parser.
 transistors: that needs `.model`/`.subckt` support and relaxing `Component`'s
 two-node assumption.
 
-**Passband gain and phase are measured but never checked.** The prompt asks for
-unity gain and nothing enforces it.
+**Passband level and phase are measured but never checked.** Peaking above the
+passband is checked (3 dB by default); the absolute level is not, and neither is
+phase.
+
+**Peaking of an undamped resonance is only as accurate as the sweep.** A truly
+undamped L-C's peak is sharper than 100 points per decade can resolve, so the
+reported figure (+35 to +71 dB for the same circuit, depending on where the
+samples land) is a lower bound. That does not change the verdict, which is
+far over 3 dB either way.
 
 **Parasitic values are representative, not measured.** This is the biggest
 caveat. Inductor winding capacitance (3 pF SMD / 15 pF breadboard) and Q at
@@ -436,11 +541,16 @@ a parasitic that does all the damage alone and one that only hurts in
 combination, but it does not say *which* pair interacts. The advice attached
 to each group is a rule of thumb, not a computed fix.
 
-**A spec can be infeasible and nothing says so.** With parasitics on, the
-stopband runs to 100 MHz by default, and on a breadboard the input–output
-coupling floor may make 40 dB there unreachable by any passive design. The
-loop then spends its whole budget. Set `--stopband-end` to the band that
-actually matters.
+**A spec can be infeasible and nothing says so.** On a breadboard, the
+input–output coupling puts a floor on attenuation at high frequencies, which
+no passive design gets below. With the default window this rarely matters;
+with `--judge-hi 1e8` it can make a spec unreachable, and the loop then spends
+its whole budget (or stalls on repeats). The diagnosis names the coupling, but
+nothing proves infeasibility.
+
+**The judged window is a default, not a physical truth.** Two decades either
+side is a convention. A user whose system has a 50 MHz interferer must say so
+with `--judge-hi`; nothing warns that one was needed.
 
 ---
 

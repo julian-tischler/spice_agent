@@ -91,11 +91,77 @@ MODEL_NAME = "gemini-3.5-flash"  # swap for a stronger model later if needed
 DEFAULT_MAX_ITERATIONS = 6
 
 
-def call_simulate_circuit_tool(args: dict, spec: DesignSpec, capture: dict | None = None) -> dict:
+# Consecutive identical designs that end a run as "stalled": the first
+# repeat is answered (not simulated) with a warning, the second ends it.
+MAX_CONSECUTIVE_REPEATS = 2
+
+
+def design_key(args: dict):
+    """
+    A design's identity for repeat detection: the components as (type,
+    unordered nodes, numeric value), ignoring ids, order and title. Two
+    proposals with the same key simulate identically. None if the proposal
+    cannot be read (it then fails validation anyway).
+    """
+    from spice_agent.units import parse_spice_value
+
+    try:
+        parts = []
+        for c in args["components"]:
+            value = c["value"]
+            if c["type"] not in ("voltage_source", "current_source"):
+                value = float(f"{parse_spice_value(value):.6g}")
+            parts.append((c["type"], tuple(sorted(c["nodes"])), value))
+        return tuple(sorted(parts, key=repr))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+class RepeatGuard:
+    """Spots a proposal the loop has already simulated (see design_key)."""
+
+    def __init__(self):
+        self.seen: dict = {}
+        self.consecutive = 0
+
+    def check(self, args: dict) -> dict | None:
+        """The earlier {iteration, result} for an identical design, or None."""
+        key = design_key(args)
+        earlier = self.seen.get(key) if key is not None else None
+        self.consecutive = self.consecutive + 1 if earlier else 0
+        return earlier
+
+    def remember(self, iteration: int, args: dict, result: dict) -> None:
+        key = design_key(args)
+        if key is not None and key not in self.seen:
+            self.seen[key] = {"iteration": iteration, "result": result}
+
+    @property
+    def stalled(self) -> bool:
+        return self.consecutive >= MAX_CONSECUTIVE_REPEATS
+
+
+def repeated_result(earlier: dict, guard: RepeatGuard) -> dict:
+    """The answer to a resubmitted design: not simulated again."""
+    msg = (f"REPEATED DESIGN: this circuit is identical to iteration "
+           f"{earlier['iteration']} (only ids, order or title may differ), so it was "
+           f"not simulated again. That attempt failed with: "
+           f"{earlier['result'].get('message', '')} Submitting it again cannot pass "
+           f"- change the design.")
+    if guard.consecutive >= MAX_CONSECUTIVE_REPEATS - 1:
+        msg += (" One more identical submission ends the run."
+                if not guard.stalled else " This was the second in a row: the run stops.")
+    return {"passed": False, "simulation_failed": False, "repeated_design": True,
+            "repeat_of": earlier["iteration"], "message": msg}
+
+
+def call_simulate_circuit_tool(args: dict, spec: DesignSpec, capture: dict | None = None,
+                               diagnose: str = "full") -> dict:
     """
     Executes the tool: attaches the fixed AC analysis block, runs the
     simulation, checks against the spec, returns the result dict.
-    `capture` (optional) collects the simulation artifacts for run logging.
+    `capture` (optional) collects the simulation artifacts for run logging;
+    `diagnose` is the parasitics-diagnosis level ("full", "basic", "off").
     """
     circuit_json = {
         "title": args.get("title", "LLM-generated circuit"),
@@ -106,7 +172,7 @@ def call_simulate_circuit_tool(args: dict, spec: DesignSpec, capture: dict | Non
         capture["circuit_json"] = circuit_json
 
     try:
-        result = simulate_and_verify(circuit_json, spec, capture=capture)
+        result = simulate_and_verify(circuit_json, spec, capture=capture, diagnose=diagnose)
     except (ValueError, KeyError, TypeError) as e:
         # Circuit.validate() or malformed JSON — turn this into feedback
         # the model can act on, rather than crashing the loop.
@@ -128,6 +194,7 @@ class AgentRunResult:
     final_circuit: dict | None = None     # the tool args that produced it
     final_text: str | None = None         # model's text if it stopped calling tools
     history: list[dict] = field(default_factory=list)  # one entry per tool call
+    stalled: bool = False                 # ended by repeated identical designs
 
 
 def run_agent_loop(
@@ -139,10 +206,11 @@ def run_agent_loop(
     retry_policy: RetryPolicy | None = None,
     verbose: bool = True,
     recorder: RunRecorder | None = None,
+    diagnose: str = "full",
 ) -> AgentRunResult:
     """
     Run the design loop for `spec`. Returns an AgentRunResult whether or
-    not the spec was met.
+    not the spec was met. `diagnose` is the parasitics-diagnosis level.
 
     `client` is any object exposing
         client.models.generate_content(model=, contents=, config=)
@@ -174,6 +242,7 @@ def run_agent_loop(
     recorder.set_system_prompt(system_prompt)
     contents = [types.Content(role="user", parts=[types.Part(text=system_prompt)])]
     run = AgentRunResult(spec=spec, passed=False, iterations=0)
+    guard = RepeatGuard()
 
     for iteration in range(1, max_iterations + 1):
         run.iterations = iteration
@@ -213,7 +282,13 @@ def run_agent_loop(
             log(f"Model proposed circuit: {json.dumps(args, indent=2)}")
 
             capture: dict = {}
-            result = call_simulate_circuit_tool(args, spec, capture=capture)
+            earlier = guard.check(args)
+            if earlier:
+                result = repeated_result(earlier, guard)
+            else:
+                result = call_simulate_circuit_tool(args, spec, capture=capture,
+                                                    diagnose=diagnose)
+                guard.remember(iteration, args, result)
             log(f"Simulation result: {result}")
             recorder.record_circuit(iteration, args, call=call_no)
             recorder.record_simulation(iteration, capture, result, call=call_no)
@@ -232,6 +307,12 @@ def run_agent_loop(
             if result.get("passed"):
                 run.passed = True
                 log(f"\nPASS: spec met after {iteration} iteration(s).")
+                return run
+            if guard.stalled:
+                run.stalled = True
+                run.final_text = (f"stalled: an already-simulated design was resubmitted "
+                                  f"{MAX_CONSECUTIVE_REPEATS} times in a row")
+                log(f"\nSTALLED: {run.final_text}")
                 return run
 
         contents.append(types.Content(role="function", parts=function_response_parts))

@@ -108,3 +108,54 @@ def test_feedback_puts_the_message_before_the_numbers():
     assert "multiply EVERY inductor and capacitor" in fed_back   # BAD misses the cutoff
     data = json.loads(fed_back.split("Measured data: ", 1)[1].split("\n")[0])
     assert data["passed"] is False and "message" not in data
+
+
+# ---------------------------------------------------------------------
+# Repeated designs
+# ---------------------------------------------------------------------
+
+def _renamed(circuit):
+    """Same design, different ids, order and title - still a repeat."""
+    comps = [dict(c, id=c["id"][0] + "9" + c["id"][1:]) for c in circuit["components"]]
+    return {"title": "something new", "components": list(reversed(comps))}
+
+
+def test_repeat_is_answered_without_simulating():
+    runner = ScriptedRunner(envelope(BAD), envelope(_renamed(BAD)), envelope(RC_LOWPASS))
+    run = run_claude_loop(SPEC, runner=runner, verbose=False)
+    assert run.passed and run.iterations == 3
+    second = run.history[1]["result"]
+    assert second["repeated_design"] is True and second["repeat_of"] == 1
+    assert "REPEATED DESIGN" in runner.calls[2][1]
+    assert "One more identical submission ends the run" in runner.calls[2][1]
+
+
+def test_second_repeat_in_a_row_stalls_the_run():
+    runner = ScriptedRunner(envelope(BAD), envelope(BAD), envelope(_renamed(BAD)),
+                            envelope(RC_LOWPASS))
+    run = run_claude_loop(SPEC, runner=runner, verbose=False)
+    assert not run.passed and run.stalled
+    assert len(runner.calls) == 3                       # stopped before the 4th call
+    assert run.final_text.startswith("stalled")
+
+
+def test_a_new_design_resets_the_repeat_count():
+    other = {"title": "x", "components": [dict(c, value="47n") if c["id"] == "C1" else c
+                                          for c in BAD["components"]]}
+    runner = ScriptedRunner(envelope(BAD), envelope(BAD), envelope(other),
+                            envelope(BAD), envelope(RC_LOWPASS))
+    run = run_claude_loop(SPEC, runner=runner, verbose=False)
+    assert run.passed and not run.stalled and run.iterations == 5
+
+
+def test_design_key_ignores_ids_order_title_and_value_spelling():
+    from spice_agent.agent.loop import design_key
+
+    a = {"title": "a", "components": [
+        {"id": "R1", "type": "resistor", "nodes": ["in", "out"], "value": "1k"},
+        {"id": "C1", "type": "capacitor", "nodes": ["out", "0"], "value": "100n"}]}
+    b = {"title": "b", "components": [
+        {"id": "C7", "type": "capacitor", "nodes": ["0", "out"], "value": "0.1u"},
+        {"id": "R3", "type": "resistor", "nodes": ["out", "in"], "value": "1000"}]}
+    assert design_key(a) == design_key(b)
+    assert design_key({"components": "garbage"}) is None

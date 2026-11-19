@@ -274,6 +274,8 @@ class RunRecorder:
             return
         if run.passed:
             status = "passed"
+        elif getattr(run, "stalled", False):
+            status = "stalled"      # the same design resubmitted repeatedly
         elif run.final_text:
             status = "stopped"      # model gave up, or a usage limit ended the run
         else:
@@ -285,6 +287,9 @@ class RunRecorder:
             "final_result": run.final_result,
             "final_text": run.final_text,
         })
+        # Written now, not only at exit: anything reading run.json before
+        # the run folder closes (the history plot) must see the verdict.
+        self._flush()
 
     # -- internals -------------------------------------------------------
     def _write_text(self, rel: str, text: str) -> None:

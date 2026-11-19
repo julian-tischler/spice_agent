@@ -25,8 +25,20 @@ PARASITIC_FSTOP = "100meg"
 
 
 def analysis_for(spec: DesignSpec) -> dict:
-    """The AC analysis block to simulate this spec with."""
+    """
+    The AC analysis block to simulate this spec with: the fixed default
+    range (wider for a non-ideal technology), extended so it always covers
+    the judged window - whether that is the default two decades around the
+    target or an edge the user set explicitly.
+    """
+    from spice_agent.units import parse_spice_value
+
     analysis = dict(AC_ANALYSIS)
     if spec.technology != "ideal":
         analysis["fstop"] = PARASITIC_FSTOP
+    lo, hi = spec.judge_window()
+    if lo < parse_spice_value(analysis["fstart"]):
+        analysis["fstart"] = f"{lo:g}"
+    if hi > parse_spice_value(analysis["fstop"]):
+        analysis["fstop"] = f"{hi:g}"
     return analysis

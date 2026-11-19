@@ -345,7 +345,8 @@ def to_asc(circuit: Circuit) -> tuple[str, Layout]:
 
 
 def export(circuit_json: dict, asc_path: str | os.PathLike | None = None,
-           cir_path: str | os.PathLike | None = None, technology=None) -> dict:
+           cir_path: str | os.PathLike | None = None, technology=None, *,
+           source_ohm: float = 0.0, load_ohm: float | None = None) -> dict:
     """
     Convenience wrapper for the agent CLI: write whichever of .asc/.cir
     were requested from a circuit JSON dict. Returns a summary dict.
@@ -355,8 +356,13 @@ def export(circuit_json: dict, asc_path: str | os.PathLike | None = None,
     simulated. The expanded circuit is no longer a simple ladder, so the
     schematic falls back to the net-label layout (reported as usual in
     the returned "layout" key).
+
+    `source_ohm` / `load_ohm` add the spec's source and load resistances
+    (R_SOURCE, R_LOAD) exactly as the simulation did, so the file is the
+    circuit that was judged; both stay ideal in the as-built version.
     """
-    circuit = as_built_circuit(Circuit.from_dict(circuit_json), technology)
+    circuit = as_built_circuit(
+        Circuit.from_dict(circuit_json).terminated(source_ohm, load_ohm), technology)
     out: dict = {}
     if asc_path is not None:
         text, layout = to_asc(circuit)

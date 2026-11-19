@@ -301,3 +301,14 @@ def test_model_feedback_drops_what_the_message_already_says():
     assert text.startswith("Simulation result: FAIL. Diagnosis")
     data = json.loads(text.split("Measured data: ", 1)[1])
     assert "message" not in data and data["cutoff_hz"] == 8834.0
+
+
+def test_gemini_loop_stalls_on_repeated_designs():
+    wrong = _with_values(RC_LOWPASS, C1="1u")
+    client = FakeGeminiClient([wrong, wrong, wrong, RC_LOWPASS])
+    run = run_agent_loop(DesignSpec("lowpass", 1590), client=client, retry_policy=NO_WAIT,
+                         verbose=False)
+    assert not run.passed and run.stalled
+    assert len(client.calls) == 3
+    assert run.history[1]["result"]["repeated_design"] is True
+    assert "REPEATED DESIGN" in _last_function_response(client)["message"]

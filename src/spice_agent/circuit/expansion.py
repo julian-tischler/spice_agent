@@ -7,12 +7,12 @@ in, the exporter's layout logic - keeps working on the ideal circuit the
 designer actually chose.
 """
 
-from spice_agent.circuit.model import GROUND
+from spice_agent.circuit.model import GROUND, SOURCE_NODE
 from spice_agent.units import parse_spice_value
 
 
 def expand_with_parasitics(components, profile, input_node: str,
-                           output_node: str) -> list[str]:
+                           output_node: str, ideal_ids=frozenset()) -> list[str]:
     """
     Turn a list of ideal Components into SPICE lines including parasitics.
 
@@ -33,6 +33,11 @@ def expand_with_parasitics(components, profile, input_node: str,
                   shunt capacitance across it.
       sources     left ideal — a source's own parasitics are not part of
                   the circuit being designed.
+      ideal_ids   left ideal as well: the harness's source/load resistors
+                  (they are the outside world, not parts on the board), and
+                  any part the diagnosis is testing as "what if this one
+                  were perfect". Their nodes still count as board nodes,
+                  except the external source node.
 
     Then, per technology:
 
@@ -76,7 +81,7 @@ def expand_with_parasitics(components, profile, input_node: str,
         n1, n2 = comp.nodes
         value = comp.value
 
-        if comp.type in ("voltage_source", "current_source"):
+        if comp.type in ("voltage_source", "current_source") or comp.id in ideal_ids:
             real_nodes.update(comp.nodes)
             lines.append(comp.to_spice_line())
             continue
@@ -143,7 +148,7 @@ def expand_with_parasitics(components, profile, input_node: str,
 
     # Stray capacitance from each real node to ground.
     if profile.interconnect_node_c:
-        for i, node in enumerate(sorted(real_nodes - {GROUND})):
+        for i, node in enumerate(sorted(real_nodes - {GROUND, SOURCE_NODE})):
             lines.append(f"C_stray{i}_{node} {node} {GROUND} "
                          f"{profile.interconnect_node_c:.6e}")
 

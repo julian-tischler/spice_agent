@@ -12,7 +12,11 @@ Import from the package; the split above is an implementation detail.
 from spice_agent.circuit.expansion import expand_with_parasitics
 from spice_agent.circuit.model import (
     COMPONENT_PREFIXES,
+    EXTERNAL_IDS,
     GROUND,
+    LOAD_ID,
+    SOURCE_ID,
+    SOURCE_NODE,
     AnalysisSpec,
     Circuit,
     Component,
@@ -29,7 +33,11 @@ from spice_agent.circuit.parasitics import (
 __all__ = [
     "BREADBOARD",
     "COMPONENT_PREFIXES",
+    "EXTERNAL_IDS",
     "GROUND",
+    "LOAD_ID",
+    "SOURCE_ID",
+    "SOURCE_NODE",
     "IDEAL",
     "PROFILES",
     "SMD_PCB",

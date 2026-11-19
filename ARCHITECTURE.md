@@ -50,14 +50,14 @@ are the model's job to derive.
 
 | Path | Holds |
 |---|---|
-| `circuit/model.py` | `Component`, `AnalysisSpec`, `Circuit`. Validation and netlist compilation. No simulator or LLM knowledge. |
+| `circuit/model.py` | `Component`, `AnalysisSpec`, `Circuit`. Validation and netlist compilation, including the harness's source/load terminations (`Circuit.terminated`). No simulator or LLM knowledge. |
 | `circuit/parasitics.py` | `TechnologyProfile` and the built-in profiles. **Edit the parasitic numbers here.** |
 | `circuit/expansion.py` | Ideal component → parasitic equivalent circuit. |
 | `simulation/ngspice.py` | The only module that knows ngspice is a process. |
 | `simulation/metrics.py` | Pure measurement of a sweep. No notion of pass or fail. |
-| `simulation/spec.py` | `DesignSpec` — the requirement model. |
+| `simulation/spec.py` | `DesignSpec` — the requirement model, including the judged window, the peaking limit and the terminations. |
 | `simulation/verify.py` | `check_filter_spec` — the verdict, and the feedback text. |
-| `simulation/diagnosis.py` | Why a non-ideal design failed: ideal comparison, per-parasitic ablation, part self-resonances. |
+| `simulation/diagnosis.py` | Why a non-ideal design failed: design vs construction, per-parasitic-group and per-component attribution, part self-resonances. Levels `full` / `basic` / `off`. |
 | `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call, including the diagnosis. |
 | `agent/analysis.py` | `analysis_for(spec)` — which AC sweep a spec is simulated with. A leaf module so prompts, loop and CLI need not import each other. |
 | `agent/rate_limit.py` | Pacing and retry for the Gemini API. Knows nothing about circuits. |
@@ -86,6 +86,33 @@ DesignSpec` — so the internal split stays an implementation detail.
 check is a requirement that silently does not apply. They are separate files
 only because `verify.py` would otherwise dominate the module.
 
+**Only what the user asked for can fail a design; everything else is
+information.** Every check runs inside `DesignSpec.judge_window()`, by
+default two decades either side of the target, and the sweep always covers
+it. The response outside is reported (`outside_window`) and never judged.
+This rule came from live breadboard runs: judging the bandpass and notch
+shape at the 100 MHz sweep end rejected designs that met every stated
+requirement (a −50 dB notch exactly on 50 kHz, failed for −19 dB at
+100 MHz), and pushed the model to make them worse. A user widens the window
+explicitly (`judge_lo_hz` / `judge_hi_hz`, or an explicit stopband end).
+`describe()` and the prompt state the judged range, so the brief and the
+verdict still cannot disagree.
+
+**The harness adds nothing the user did not ask for.** Source and load
+resistances are spec fields (`source_ohm=0`, `load_ohm=None`: ideal source,
+open output). When set, `Circuit.terminated()` inserts `R_SOURCE` / `R_LOAD`
+at netlist time. They are ideal (outside the parasitic expansion and its
+stray node capacitance), their ids and the `src_ext` node are reserved so a
+designed circuit cannot touch them, and the export writes them out. Checks are
+relative to the passband level, so the −6 dB of a matched pair is not a
+failure.
+
+**No check ends the verdict early.** A failed shape check (bandpass rolloff,
+notch symmetry) is one failure among the others, so centre, bandwidth, depth,
+peaking and stopband are always measured and reported. The only early returns
+left are a response that is the wrong filter type or has no measurable
+cutoff.
+
 **Failure messages are written to be acted on, not just read.** The same 20 dB
 shortfall means different things in different places: at a stopband edge the
 filter order is too low, deeper in the band something is resonating or leaking.
@@ -94,6 +121,12 @@ reports both when both apply (`stopband_causes`). Naming only one used to tell
 the model "more order will not help" while the edge was also short. Frequency
 misses come with the exact L/C scale factor, and an order shortfall comes with
 a suggested Butterworth order.
+
+**The loop refuses to re-simulate a repeated design.** `loop.design_key`
+identifies a design by its components (type, unordered nodes, numeric value),
+ignoring ids, order and title. A repeat is answered with the earlier verdict
+and not simulated again, and a second repeat in a row ends the run as
+`stalled`. Both backends share `RepeatGuard`.
 
 **The verdict and the diagnosis are separate layers.** `verify.py` judges one
 sweep and knows nothing about the circuit. `diagnosis.py` needs the circuit and
@@ -104,7 +137,17 @@ made the stopband *worse*, while on its own it is the whole problem. On
 another, every group alone was harmless, while removing the winding
 capacitance won back 21 dB. Groups are ranked by the larger effect; the
 module docstring has the numbers. It only runs for a failed non-ideal design, never
-changes the verdict, and is skipped with `simulate_and_verify(..., diagnose=False)`.
+changes the verdict. It diagnoses only failures that ideal parts would pass;
+a check that ideal parts also fail is a design problem and is named as one,
+never blamed on parasitics. At level `full` (the default) it also re-simulates
+with each component (or group of identical parallel parts) made ideal on its
+own (`ideal_ids` in the expansion), which names the part to change. Losses
+(winding resistance, ESR, contact resistance) form their own group, but the
+isolation baseline keeps them on: real parts are never lossless, and a
+lossless baseline made other groups' damage vanish into interactions with
+them. Losses are charged against a separate lossless run instead. `basic`
+skips that, and `off` (or `diagnose=False`) skips the diagnosis. It never
+proposes values: a harness that searched for them would be measuring itself.
 
 **The model sees a trimmed copy of the result.** `agent.loop.model_feedback`
 rounds floats to 4 significant figures and drops fields the message already
@@ -210,9 +253,10 @@ would otherwise be filed as live runs.
   means a second analysis path and a second parser.
 - **Two-terminal passives only.** No op-amps or transistors: that needs
   `.model`/`.subckt` support and relaxing `Component`'s two-node assumption.
-- **Phase is simulated and plotted but never checked.** Likewise passband gain
-  is measured and reported, but no spec field requires it — the prompt asks for
-  unity gain and nothing enforces it.
+- **Phase and absolute passband level are measured but never checked.**
+  Peaking above the passband is (`max_peaking_db`, default 3 dB). That limit
+  exists because a live breadboard run was accepted with +12 dB of resonant
+  peaking near cutoff. A notch has no width requirement.
 - **Parasitic values are representative, not measured.** Inductor winding
   capacitance is the load-bearing figure and the least certain one, with Q at
   self-resonance a close second; `profile.inductor_srf_hz(L)` exists to check

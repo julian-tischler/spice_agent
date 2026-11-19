@@ -187,3 +187,23 @@ def test_runs_are_filed_by_mode(tmp_path, backend, live, mode):
     assert line["mode"] == mode and line["path"] == rec.root.name
     other = tmp_path / ("dry" if mode == "live" else "live")
     assert not other.exists()
+
+
+def test_finish_writes_the_verdict_before_the_folder_closes(tmp_path):
+    """The history plot reads run.json inside the `with recorder:` block; it
+    used to see status 'running' for every finished run."""
+    rec = RunRecorder.start(spec=DesignSpec(), backend="gemini", model="m", argv=[],
+                            runs_dir=tmp_path)
+    with rec:
+        rec.finish(AgentRunResult(spec=DesignSpec(), passed=False, iterations=2))
+        on_disk = json.loads((rec.root / "run.json").read_text())
+        assert on_disk["status"] == "failed" and on_disk["iterations_used"] == 2
+
+
+def test_stalled_run_status(tmp_path):
+    rec = RunRecorder.start(spec=DesignSpec(), backend="gemini", model="m", argv=[],
+                            runs_dir=tmp_path)
+    with rec:
+        rec.finish(AgentRunResult(spec=DesignSpec(), passed=False, iterations=3,
+                                  final_text="stalled: ...", stalled=True))
+    assert json.loads((rec.root / "run.json").read_text())["status"] == "stalled"

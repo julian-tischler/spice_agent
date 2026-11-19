@@ -91,11 +91,13 @@ def test_rejected_for_bandpass_and_notch(ftype):
 
 
 def test_describe_mentions_the_stopband():
-    # "above", not "at": the requirement covers the whole band.
+    # The whole band, not "at" a point - and with no explicit end the band
+    # stops at the judged-window edge (two decades from the target), so
+    # that is what the model is told.
     d = DesignSpec("lowpass", 1e4, stopband_hz=1e5, stopband_atten_db=40).describe()
-    assert "40 dB below passband above 100000 Hz" in d
+    assert "40 dB below passband everywhere from 100000 Hz to 1e+06 Hz" in d
     d = DesignSpec("highpass", 1e4, stopband_hz=1e3, stopband_atten_db=40).describe()
-    assert "40 dB below passband below 1000 Hz" in d
+    assert "40 dB below passband everywhere from 100 Hz to 1000 Hz" in d
     # Note %g switches to exponential past 6 significant digits, so 1e6
     # renders as "1e+06" rather than "1000000".
     d = DesignSpec("lowpass", 1e4, stopband_hz=1e5, stopband_atten_db=40,
@@ -220,7 +222,8 @@ def test_prompt_carries_the_stopband_and_order_hint():
 
     p = build_system_prompt(DesignSpec("lowpass", 10_000, stopband_hz=100_000,
                                        stopband_atten_db=40))
-    assert "40 dB below passband above 100000 Hz" in p
+    assert "40 dB below passband everywhere from 100000 Hz to 1e+06 Hz" in p
+    assert "Judged from 100 Hz to 1e+06 Hz" in p
     assert "ORDER SETS THE ROLLOFF" in p
     assert "20*n dB per decade" in p
 
@@ -315,25 +318,41 @@ def test_explicit_band_end_narrows_the_requirement(wide_sweeps):
     semantic difference this field introduces.
     """
     df = wide_sweeps["resonant"]
+    # This undamped LC peaks in the passband; peaking is not what is tested.
+    common = dict(stopband_hz=98_000, stopband_atten_db=55, max_peaking_db=None)
 
     narrow = check_filter_spec(df, DesignSpec(
-        "lowpass", 15_000, stopband_hz=98_000, stopband_atten_db=55,
-        stopband_end_hz=105_000))
+        "lowpass", 15_000, stopband_end_hz=105_000, **common))
     assert narrow["passed"] is True
     assert narrow["stopband_end_hz"] == 105_000
     assert narrow["stopband_atten_db"] == pytest.approx(61.9, abs=1.0)
 
-    open_ended = check_filter_spec(df, DesignSpec(
-        "lowpass", 15_000, stopband_hz=98_000, stopband_atten_db=55))
-    assert open_ended["passed"] is False
-    assert open_ended["stopband_atten_db"] == pytest.approx(40.1, abs=1.0)
+    to_100mhz = check_filter_spec(df, DesignSpec(
+        "lowpass", 15_000, stopband_end_hz=1e8, judge_hi_hz=1e8, **common))
+    assert to_100mhz["passed"] is False
+    assert to_100mhz["stopband_atten_db"] == pytest.approx(40.1, abs=1.0)
 
 
-def test_band_defaults_to_the_end_of_the_sweep(wide_sweeps):
+def test_band_defaults_to_the_judged_window_edge(wide_sweeps):
+    """Not the end of the 100 MHz sweep: two decades above the 15 kHz target
+    (which is also a decade past the 150 kHz edge)."""
     r = check_filter_spec(wide_sweeps["clean"],
                           DesignSpec("lowpass", 15_000, stopband_hz=150_000,
                                      stopband_atten_db=40))
-    assert r["stopband_end_hz"] == pytest.approx(1e8, rel=1e-6)
+    assert r["stopband_end_hz"] == pytest.approx(1.5e6, rel=1e-6)
+    assert r["judge_hi_hz"] == pytest.approx(1.5e6, rel=1e-6)
+
+
+def test_explicit_stopband_end_widens_the_default_window():
+    """An explicit stopband end IS the user saying they care that far out, so
+    the default window grows to include it; only an explicit judge_hi_hz
+    that is too narrow for it is a contradiction."""
+    s = DesignSpec("lowpass", 1e4, stopband_hz=1e5, stopband_atten_db=40,
+                   stopband_end_hz=1e8)
+    assert s.judge_window() == (100.0, 1e8)
+    with pytest.raises(ValueError, match="outside the judged window"):
+        DesignSpec("lowpass", 1e4, stopband_hz=1e5, stopband_atten_db=40,
+                   stopband_end_hz=1e8, judge_hi_hz=1e7)
 
 
 def test_monotonic_filter_band_equals_point(sweeps):
@@ -407,13 +426,18 @@ def _synthetic_lowpass(fc=1e4, leak_db_at_1e8=-25.0):
     return pd.DataFrame({"freq": f, "gain_db": 20 * np.log10(mag)})
 
 
+# The leak only shows at 100 MHz, two decades past the default judged
+# window, so this spec asks for the full band explicitly.
+FULL_BAND_SPEC = DesignSpec("lowpass", 10_000, stopband_hz=100_000, stopband_atten_db=45,
+                            stopband_end_hz=1e8, judge_hi_hz=1e8)
+
+
 def test_both_stopband_causes_are_reported():
     """The live breadboard run that motivated this: 38.9 dB at the edge AND
     25 dB at 100 MHz. Reporting only the resonance told the model 'more
     order will not help', and it never tried 3rd order."""
     r = check_filter_spec(_synthetic_lowpass(),
-                          DesignSpec("lowpass", 10_000, stopband_hz=100_000,
-                                     stopband_atten_db=45))
+                          FULL_BAND_SPEC)
     assert r["passed"] is False
     assert r["stopband_causes"] == ["order", "resonance"]
     assert "TWO separate stopband problems" in r["message"]
@@ -428,8 +452,7 @@ def test_order_advice_names_an_order():
     order 3 gives 60.0 dB, so 3 is the suggestion; the synthetic filter
     itself is 2nd order."""
     r = check_filter_spec(_synthetic_lowpass(),
-                          DesignSpec("lowpass", 10_000, stopband_hz=100_000,
-                                     stopband_atten_db=45))
+                          FULL_BAND_SPEC)
     assert r["suggested_order"] == 3
     assert r["effective_order"] == pytest.approx(2.0, abs=0.1)
     assert "Butterworth of order 3 gives 60.0 dB" in r["message"]
@@ -438,8 +461,7 @@ def test_order_advice_names_an_order():
 
 def test_failed_stopband_carries_a_profile():
     r = check_filter_spec(_synthetic_lowpass(),
-                          DesignSpec("lowpass", 10_000, stopband_hz=100_000,
-                                     stopband_atten_db=45))
+                          FULL_BAND_SPEC)
     hz = [p["hz"] for p in r["stopband_profile"]]
     assert hz == pytest.approx([1e5, 1e6, 1e7, 1e8], rel=1e-3)
     assert r["stopband_profile"][-1]["atten_db"] == pytest.approx(r["stopband_atten_db"], abs=0.1)
@@ -473,3 +495,27 @@ def test_no_scale_hint_when_on_target(sweeps):
     r = check_filter_spec(sweeps["rc1"], DesignSpec("lowpass", 10_000))
     assert "frequency_scale_factor" not in r
     assert "multiply EVERY" not in r["message"]
+
+
+def test_cli_judging_flags_reach_the_spec(monkeypatch):
+    import spice_agent.agent.cli as cli
+
+    seen = {}
+
+    def fake_loop(spec, **kw):
+        seen.update(spec=spec, kw=kw)
+        return cli.AgentRunResult(spec=spec, passed=False, iterations=0)
+
+    monkeypatch.setattr(cli, "run_agent_loop", fake_loop)
+    cli.main(["--no-log", "--type", "notch", "--target", "50000",
+              "--judge-lo", "1000", "--judge-hi", "1e8", "--max-peaking", "off",
+              "--source-ohm", "50", "--load-ohm", "1000", "--diagnosis", "basic"])
+    s = seen["spec"]
+    assert (s.judge_lo_hz, s.judge_hi_hz, s.max_peaking_db) == (1000, 1e8, None)
+    assert (s.source_ohm, s.load_ohm) == (50, 1000)
+    assert seen["kw"]["diagnose"] == "basic"
+
+    cli.main(["--no-log", "--type", "lowpass", "--target", "1000"])
+    s = seen["spec"]
+    assert (s.max_peaking_db, s.source_ohm, s.load_ohm) == (3.0, 0.0, None)
+    assert seen["kw"]["diagnose"] == "full"

@@ -87,10 +87,12 @@ def plot_bode(circuit_json: dict, save_path: str = "bode_plot.png",
     # Simulate the circuit as built (with the spec's technology parasitics),
     # and for a non-ideal technology also the ideal one, to overlay.
     if df is None:
-        df = simulate_get_full_sweep(circuit_json, technology=spec.technology)
+        df = simulate_get_full_sweep(circuit_json, technology=spec.technology,
+                                    source_ohm=spec.source_ohm, load_ohm=spec.load_ohm)
     df_ideal = None
     if spec.technology != "ideal":
-        df_ideal = simulate_get_full_sweep(circuit_json, technology="ideal")
+        df_ideal = simulate_get_full_sweep(circuit_json, technology="ideal",
+                                          source_ohm=spec.source_ohm, load_ohm=spec.load_ohm)
 
     fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 
