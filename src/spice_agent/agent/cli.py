@@ -71,6 +71,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     jd.add_argument("--load-ohm", type=float, default=None, metavar="OHM",
                     help="load resistance the harness puts from 'out' to ground "
                          "(default: none, 'out' unloaded); the model cannot change it")
+    ac = p.add_argument_group("active parts (default: none - passive design only)")
+    ac.add_argument("--supply", type=float, default=None, metavar="V",
+                    help="symmetric supply rails +V / -V at nodes vcc / vee; enables "
+                         "op-amps")
+    ac.add_argument("--supply-pos", type=float, default=None, metavar="V",
+                    help="positive rail (with --supply-neg), e.g. 5 for single supply")
+    ac.add_argument("--supply-neg", type=float, default=None, metavar="V",
+                    help="negative rail (with --supply-pos), e.g. 0 for single supply")
+    ac.add_argument("--gain", type=float, default=None, metavar="DB",
+                    help="required passband gain in dB (default: not checked)")
+    ac.add_argument("--gain-tol", type=float, default=1.0, metavar="DB",
+                    help="tolerance on --gain, dB (default 1)")
+    ac.add_argument("--max-supply-current", type=_amps, default=None, metavar="A",
+                    help="max current from each supply rail, e.g. 1m (default: no budget)")
+    ac.add_argument("--passive-only", action="store_true",
+                    help="no op-amps even though supply rails are given")
     p.add_argument("--diagnosis", choices=["full", "basic", "off"], default="full",
                    help="parasitics diagnosis of failed non-ideal designs: full (default; "
                         "includes the per-component check, a few seconds per iteration), "
@@ -110,6 +126,26 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _amps(text: str) -> float:
+    """'1m', '500u' or '0.001' -> amps."""
+    from spice_agent.units import parse_spice_value
+    try:
+        return parse_spice_value(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a current: {text!r}") from None
+
+
+def _rails(a) -> tuple[float | None, float | None]:
+    if a.supply is not None:
+        if a.supply_pos is not None or a.supply_neg is not None:
+            raise SystemExit("use either --supply or --supply-pos/--supply-neg, not both")
+        return abs(a.supply), -abs(a.supply)
+    if (a.supply_pos is None) != (a.supply_neg is None):
+        raise SystemExit("--supply-pos and --supply-neg go together "
+                         "(single supply: --supply-neg 0)")
+    return a.supply_pos, a.supply_neg
+
+
 def _peaking_arg(text: str) -> float | None:
     if str(text).strip().lower() in ("off", "none"):
         return None
@@ -136,6 +172,12 @@ def main(argv=None) -> int:
         max_peaking_db=_peaking_arg(a.max_peaking),
         source_ohm=a.source_ohm,
         load_ohm=a.load_ohm,
+        supply_pos_v=_rails(a)[0],
+        supply_neg_v=_rails(a)[1],
+        passband_gain_db=a.gain,
+        gain_tolerance_db=a.gain_tol,
+        max_supply_current_a=a.max_supply_current,
+        allow_active=not a.passive_only,
     )
     argv_used = list(argv) if argv is not None else None
     if a.backend == "claude":
@@ -242,11 +284,15 @@ def export_design(run: AgentRunResult, asc_path=None, cir_path=None, plot_path=N
         # files describe what was simulated, not the ideal design.
         info.update(export(circuit_json, asc_path=asc_path, cir_path=cir_path,
                            source_ohm=run.spec.source_ohm, load_ohm=run.spec.load_ohm,
+                           supply_pos=run.spec.supply_pos_v,
+                           supply_neg=run.spec.supply_neg_v,
                            technology=run.spec.technology))
         for key in ("asc", "cir"):
             if key in info:
                 print(f"Wrote LTspice {key}: {info[key]}"
                       + (f"  (layout: {info['layout']})" if key == "asc" else ""))
+        if "asc_skipped" in info:
+            print(f"Skipped LTspice asc: {info['asc_skipped']} (the .cir has the full circuit)")
 
     if plot_path:
         from spice_agent.plotting import plot_bode

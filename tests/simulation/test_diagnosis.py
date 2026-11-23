@@ -107,14 +107,31 @@ def test_ideal_technology_has_no_diagnosis():
     assert "parasitics" not in run("ideal")
 
 
-def test_diagnosis_can_be_switched_off():
-    r = run("breadboard", diagnose=False)
+@pytest.mark.parametrize("off", [False, "off"])
+def test_diagnosis_can_be_switched_off(off):
+    r = run("breadboard", diagnose=off)
     assert r["passed"] is False and "parasitics" not in r
     assert "Diagnosis:" not in r["message"]
 
 
+def test_smd_ladder_meets_the_response_but_is_not_buildable():
+    """Electrically fine on smd_pcb (48.9 dB at 46.8 MHz), but 17.29 mH is
+    beyond the 10 mH an SMD inductor offers: it fails as not buildable,
+    still reports its response, and the diagnosis blames the design."""
+    r = run("smd_pcb")
+    assert r["passed"] is False
+    assert r["stopband_atten_db"] == pytest.approx(48.9, abs=1.0)
+    assert r["message"].startswith("NOT BUILDABLE - L1 = 17.3 mH exceeds the 10 mH")
+    assert [v["id"] for v in r["availability"]["violations"]] == ["L1", "L2"]
+    assert "availability" in r["parasitics"]["design_failures"]
+
+
 def test_passing_design_has_no_diagnosis():
-    r = run("smd_pcb")                            # 48.9 dB at 46.8 MHz on smd_pcb
+    s = DesignSpec("lowpass", 10_000, technology="smd_pcb", load_ohm=50)
+    lc = {"title": "L-C into 50 ohm", "components": [
+        V1, {"id": "L1", "type": "inductor", "nodes": ["in", "out"], "value": "1.125m"},
+        {"id": "C1", "type": "capacitor", "nodes": ["out", "0"], "value": "225n"}]}
+    r = simulate_and_verify(dict(lc, analysis=analysis_for(s)), s)
     assert r["passed"] is True and "parasitics" not in r
 
 

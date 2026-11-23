@@ -7,7 +7,9 @@ textbook designs), measured first (2026-11-19):
 
     notch 50 kHz, R 1k + series L 100u / C 100n     49.5 dB deep, at 50.1 kHz;
         rejected live only because 100 MHz sat at -18.8 dB vs -0.4 dB at 1 Hz
-    notch 50 kHz, R 10 + L 150u / C 68n             11 dB deep, ideal too
+    notch 50 kHz, R 10 + L 150u / 5R / C 68n        9.5 dB deep, ideal too (the
+        5 ohm is in the design; without it the ideal zero is ~100 dB deep -
+        the 100/dec grid alone read it as 11 dB before notch refinement)
     bandpass 100 kHz/20 kHz, L 100u, C 25n, R 12.6   bandwidth +26.5% on
         breadboard; L1 made ideal alone recovers 25.1 % and passes
     highpass 10 kHz C-L-C (160n/0.8m/160n) + 100R    cutoff 9762 Hz against
@@ -42,7 +44,8 @@ NOTCH_GOOD = [c("R1", "resistor", ["in", "out"], "1k"),
               c("C1", "capacitor", ["n1", "0"], "100n")]
 NOTCH_SHALLOW = [c("R1", "resistor", ["in", "out"], "10"),
                  c("L1", "inductor", ["out", "n1"], "150u"),
-                 c("C1", "capacitor", ["n1", "0"], "68n")]
+                 c("R2", "resistor", ["n1", "n2"], "5"),
+                 c("C1", "capacitor", ["n2", "0"], "68n")]
 BANDPASS_WIDE = [c("L1", "inductor", ["in", "n1"], "100u"),
                  c("C1", "capacitor", ["n1", "out"], "25n"),
                  c("R1", "resistor", ["out", "0"], "12.6")]
@@ -111,9 +114,9 @@ def test_failed_shape_still_reports_every_measurement():
     """No early return: a failing check must not hide how close the rest are."""
     r = run(NOTCH_GOOD, DesignSpec("notch", 5e4, min_notch_depth_db=30,
                                    technology="breadboard", judge_hi_hz=1e8))
-    assert r["notch_hz"] == pytest.approx(50119, rel=0.01)
-    assert r["notch_depth_db"] == pytest.approx(49.5, abs=1.0)
-    assert "notch at 50118.7 Hz" in r["message"]
+    assert r["notch_hz"] == pytest.approx(50309, rel=0.01)
+    assert r["notch_depth_db"] == pytest.approx(49.6, abs=1.0)
+    assert f"notch at {r['notch_hz']:.1f} Hz" in r["message"]
 
 
 def test_highpass_passband_reference_is_inside_the_window():
@@ -264,11 +267,6 @@ def test_basic_level_skips_the_per_component_check():
     assert d["check"] == "bandwidth"
 
 
-def test_off_level_skips_the_diagnosis():
-    r = run(BANDPASS_WIDE, BANDPASS_BB, diagnose="off")
-    assert "parasitics" not in r and "Diagnosis:" not in r["message"]
-
-
 def test_design_failures_are_not_blamed_on_parasitics():
     d = run(NOTCH_SHALLOW, NOTCH_BB)["parasitics"]
     assert d["design_failures"] == ["notch depth"]
@@ -284,3 +282,55 @@ def test_parallel_identical_parts_are_one_group():
         {"title": "t", "components": [V1, c("L1", "inductor", ["in", "out"], "1m")] + caps}))
     assert len(groups) == 2
     assert groups[1]["label"] == "C1..C20 (20x 30n, out-0)"
+
+
+# ---------------------------------------------------------------------
+# Notch refinement: the depth is not limited by the sweep grid
+# ---------------------------------------------------------------------
+
+# The live breadboard run of 2026-11-23, iteration 1: R 100, L 1m, C 10n.
+NOTCH_LIVE_R100 = [c("R1", "resistor", ["in", "out"], "100"),
+                   c("L1", "inductor", ["out", "n1"], "1m"),
+                   c("C1", "capacitor", ["n1", "0"], "10n")]
+
+
+def test_refine_notch_finds_the_minimum_between_grid_points():
+    import numpy as np
+    import pandas as pd
+
+    from spice_agent.simulation.pipeline import refine_notch
+
+    def response(f):           # |f - 1234.5| on a dB scale: a zero at 1234.5 Hz
+        return pd.DataFrame({"freq": f, "gain_db": 20 * np.log10(np.abs(f - 1234.5) + 1e-9)})
+
+    coarse = response(np.logspace(2, 4, 201))
+    calls = []
+    fine = refine_notch(coarse, lambda a, b, n: calls.append((a, b)) or response(
+        np.linspace(a, b, n)), 100, 1e4)
+    assert len(calls) == 1 and calls[0][0] < 1234.5 < calls[0][1]
+    f_min = fine["freq"].iloc[int(np.argmin(fine["gain_db"].to_numpy()))]
+    assert f_min == pytest.approx(1234.5, rel=1e-5)
+    assert fine["freq"].is_monotonic_increasing and len(fine) > len(coarse)
+
+
+def test_ideal_notch_is_not_read_as_shallow():
+    """An ideal series-RLC zero is infinitely deep; the 100/dec grid alone
+    read 31.5 dB at 50.12 kHz, off the true 50.33 kHz resonance."""
+    r = run(NOTCH_LIVE_R100, DesignSpec("notch", 5e4, min_notch_depth_db=50))
+    assert r["passed"] is True
+    assert r["notch_depth_db"] > 90
+    assert r["notch_hz"] == pytest.approx(50329, rel=1e-3)
+
+
+def test_lossy_notch_is_blamed_on_the_losses_not_the_design():
+    """Live, the diagnosis told the model the 50 dB failure 'is in the design
+    itself - ideal parts fail it too', because the ideal sweep was grid-
+    limited. The cause is L1's winding resistance: depth = 20log((R+r)/r)."""
+    r = run(NOTCH_LIVE_R100, DesignSpec("notch", 5e4, min_notch_depth_db=50,
+                                        technology="breadboard"))
+    assert r["passed"] is False
+    assert r["notch_depth_db"] == pytest.approx(20.2, abs=0.5)
+    d = r["parasitics"]
+    assert d["ideal_parts_passed"] is True
+    assert d["design_failures"] == [] and d["parasitic_failures"] == ["notch depth"]
+    assert "ideal parts fail it too" not in r["message"]

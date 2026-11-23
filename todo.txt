@@ -1,0 +1,88 @@
+spice-agent - open work (written 2026-11-23, before context compression)
+=========================================================================
+
+STATE
+-----
+- Last commit: e118004. EVERYTHING since is UNCOMMITTED, including:
+  * stage 1 op-amps: models/opamps.py (grades GP1/FET3/RR10, OPAMP_IDEAL
+    only for ideal technology + diagnosis), multi-pin Component (pins/part),
+    harness supply rails (vcc/vee), operating point + simulation/raw.py,
+    simulation/bias.py (saturation, input range, DC path, supply rating,
+    current budget), --supply/--gain/--gain-tol
+  * grades-not-physics: technology decides op-amp physics; ideal tech swaps
+    every op-amp for OPAMP_IDEAL; catalogue properties (supply rating,
+    quiescent current) bind on every technology
+  * constraints: neutral prompt (passive + active hints, TRADE-OFFS note),
+    simulation/availability.py (inductance limit: smd 10 mH, breadboard
+    100 mH, ideal none -> NOT BUILDABLE), --max-supply-current (OVER BUDGET),
+    --passive-only, rail- and budget-aware grade advice
+  * feedback text fixes (gain hint, diagnosis opening, stray-C advice,
+    passive-only gain hint, facts-only rewrites)
+  * ARCHITECTURE.md rule: "feedback and hints convey hard facts only"
+  * hint catalogue: src/spice_agent/hints.py (91 hints, documented),
+    generated HINTS.md (python -m spice_agent.hints), tests/test_hints.py
+- Tests: 733 offline pass (python -m pytest -m "not live"); 15 LTspice pass
+  (LTspice was updated by the user and works again).
+- Live runs: Claude backend via winget CLI:
+  CLAUDE_BIN="$LOCALAPPDATA/Microsoft/WinGet/Links/claude.exe"
+
+NEXT (in rough order)
+---------------------
+[x] 1. Commit the work above (committed 2026-11-23, after a test-suite cleanup).
+[x] 2. Live check of the hint wording (2026-11-23): notch 50 kHz on
+       breadboard, 30 dB with and without --supply (both 1 iteration), 50 dB
+       (2 iterations; R=100 gave 20 dB = 20log((R+r)/r), as the hint says).
+       Found + fixed: passive design on a powered spec lost its final
+       exports; notch depth was grid-limited (ideal zero read 31.5 dB) so the
+       diagnosis blamed the design instead of L1's losses -> refine_notch in
+       pipeline.py (one 5001-point linear pass around the minimum).
+[ ] 3. Light passive catalogue (agreed earlier as step 2 of the "catalogue"
+       discussion): standard value series (--series E12/E24/E96, off by
+       default) checked by the validator with feedback ("2.25n is not E24;
+       nearest 2.2n / 2.4n"); availability limits for C/R as well as L.
+       Rationale: rounding to standard values has no closed form -> real
+       simulation-in-the-loop value.
+[ ] 4. Wider op-amp grade set (~7 grades spanning real trade-offs: speed vs
+       power, supply range, bias current, rail-to-rail) - only meaningful now
+       that a supply-current budget exists. Keep generic, self-written models.
+[ ] 5. Stage 2 (planned): transient analysis via raw.py - harness-owned
+       stimulus (step / sine at spec amplitude), checks for clipping,
+       slew-rate distortion, overshoot/settling, oscillation; "supply wiring"
+       parasitic group (breadboard rail inductance, decoupling); signal
+       amplitude spec field.
+[ ] 6. Stage 3 (planned): transistors (BJT/MOSFET pins + model cards),
+       bias-region checks, DesignSpec as a requirement list with an
+       amplifier preset (gain, bandwidth, Zin/Zout, swing, THD via .four,
+       supply current), convergence-failure feedback.
+[ ] 7. Stage 4: LTspice .asc export for op-amp circuits (currently skipped
+       with a recorded reason; .cir works), transient panels in history.png.
+
+SMALLER OPEN ITEMS / IDEAS
+--------------------------
+- Batch/eval mode: run each spec N times and report pass rate - single live
+  runs are noisy (same 50 kHz spec passed in 4, failed in 5, passed in 2).
+- Notch has no width requirement (a very wide notch is judged against an
+  already-attenuated passband) - optional notch-width field.
+- Undamped-LC peaking is sampling-limited (+35..+71 dB for one circuit) -
+  verdict unaffected, documented in README limitations.
+- Gemini backend with the nested op-amp "pins" schema is untested live.
+- 200 kHz LP run: model switched to active instead of adding the missing
+  damping resistor after a +3.8 dB peaking failure - watch, no action yet.
+- Passive-only 50 kHz Q=10 bandpass on SMD sits at the loss floor of the
+  series RLC (-1.03 dB vs +/-1 dB); per the facts-only rule we do NOT add a
+  "topology at its limit" note.
+
+PRINCIPLES AGREED THIS SESSION (keep applying)
+----------------------------------------------
+- Spec = what the filter must do + the world it lives in, never how to
+  build it. Harness adds nothing the user did not ask for (source 0 ohm, no
+  load, no rails by default).
+- Judged window default: 2 decades around target; anything wider must be
+  set explicitly; outside the window = reported, never failed.
+- Max passband peaking default 3 dB.
+- The model chooses component types/values/grades; the technology decides
+  the physics; catalogue properties bind on every technology.
+- Feedback = hard facts only (measured on this design, or from the
+  catalogue/spec). Rules of thumb allowed but always labelled. Never claims
+  about designs that were not simulated. The harness never searches values.
+- All advice text lives in hints.py with documentation; HINTS.md generated.

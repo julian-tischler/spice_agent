@@ -396,7 +396,7 @@ def test_a_spec_that_passes_ideal_fails_when_built(sweeps):
     assert ideal["passed"] is True
     assert built["passed"] is False
     assert "NOT at the band edge" in built["message"]
-    assert "resonating" in built["message"]
+    assert "a resonance or a path around the filter" in built["message"]
 
 
 # ---------------------------------------------------------------------

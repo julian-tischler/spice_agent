@@ -86,6 +86,26 @@ class DesignSpec:
     # R_LOAD from 'out' to ground, both ideal, both outside the parasitics.
     source_ohm: float = 0.0
     load_ohm: float | None = None
+    # Supply rails for active parts, held at the nodes 'vcc' / 'vee' by the
+    # harness (the model may connect to them, never drive them). None = no
+    # supplies: passive parts only. Both or neither; single-supply designs
+    # give supply_neg_v=0.
+    supply_pos_v: float | None = None
+    supply_neg_v: float | None = None
+    # Optional absolute passband gain target (dB, at the passband reference;
+    # the peak for a bandpass). None = only relative checks, as for passive
+    # filters. Active filters can have gain, so this is how a user asks for
+    # unity (0) or, say, +20 dB.
+    passband_gain_db: float | None = None
+    gain_tolerance_db: float = 1.0
+    # Maximum current drawn from EACH supply rail, amps (as a datasheet states
+    # supply current). None = no budget. Judged with the op-amp grades'
+    # catalogue quiescent current on every technology, so a power budget
+    # binds even when the op-amps are simulated as ideal.
+    max_supply_current_a: float | None = None
+    # False = passive parts only even though rails exist ("the board has
+    # +/-12 V, but I want a passive filter").
+    allow_active: bool = True
 
     def __post_init__(self):
         if self.filter_type not in ("lowpass", "highpass", "bandpass", "notch"):
@@ -165,6 +185,31 @@ class DesignSpec:
             raise ValueError("source_ohm must be >= 0")
         if self.load_ohm is not None and self.load_ohm <= 0:
             raise ValueError("load_ohm must be positive, or None for no load")
+        if (self.supply_pos_v is None) != (self.supply_neg_v is None):
+            raise ValueError("supply_pos_v and supply_neg_v must be given together "
+                             "(single supply: supply_neg_v=0)")
+        if self.supply_pos_v is not None:
+            if self.supply_pos_v <= 0 or self.supply_neg_v >= self.supply_pos_v:
+                raise ValueError(f"supply rails must satisfy supply_neg_v < supply_pos_v "
+                                 f"and supply_pos_v > 0, got {self.supply_pos_v:g} / "
+                                 f"{self.supply_neg_v:g} V")
+        if self.gain_tolerance_db <= 0:
+            raise ValueError("gain_tolerance_db must be positive")
+        if self.max_supply_current_a is not None:
+            if self.max_supply_current_a <= 0:
+                raise ValueError("max_supply_current_a must be positive")
+            if not self.powered:
+                raise ValueError("max_supply_current_a needs supply rails "
+                                 "(supply_pos_v / supply_neg_v)")
+
+    @property
+    def powered(self) -> bool:
+        return self.supply_pos_v is not None
+
+    @property
+    def active_allowed(self) -> bool:
+        """Op-amps may be used: rails exist and the user did not forbid it."""
+        return self.powered and self.allow_active
 
     def stopband_end(self, f_lo: float | None = None, f_hi: float | None = None) -> float:
         """The stopband's far edge: explicit, else the judged-window edge."""
@@ -254,6 +299,17 @@ class DesignSpec:
             src = f"{self.source_ohm:g} ohm source" if self.source_ohm > 0 else "ideal source"
             load = f"{self.load_ohm:g} ohm load" if self.load_ohm is not None else "no load"
             parts.append(f"driven from a {src} into a {load}")
+        if self.passband_gain_db is not None:
+            where = "peak gain" if self.filter_type == "bandpass" else "passband gain"
+            parts.append(f"{where} {self.passband_gain_db:g} dB "
+                         f"(+/-{self.gain_tolerance_db:g} dB)")
+        if self.powered:
+            parts.append(f"supply rails {self.supply_pos_v:g} V / {self.supply_neg_v:g} V")
+            if self.max_supply_current_a is not None:
+                parts.append(f"at most {self.max_supply_current_a * 1e3:g} mA from each "
+                             f"supply rail")
+            if not self.allow_active:
+                parts.append("passive parts only")
         return "; ".join(parts)
 
     def to_dict(self) -> dict:

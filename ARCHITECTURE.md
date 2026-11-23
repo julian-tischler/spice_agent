@@ -16,6 +16,46 @@ A second rule follows from it: **the model is told what to achieve, never how.**
 A spec is a frequency, a tolerance, an attenuation. Topology and filter order
 are the model's job to derive.
 
+A third governs everything the harness says back: **feedback and hints convey
+hard facts only.** A fact is one of two kinds:
+
+- **measured on this design**, by simulating the circuit the model proposed:
+  "bandwidth 9.6% too wide", "L1's winding resistance costs 1 dB", "with
+  an ideal U1 it would pass", or an exact consequence of one, such as the L/C
+  scale factor that moves a measured frequency onto target;
+- **read from the catalogue or the spec**, checkable against the library and
+  the user's numbers: "no grade faster than OPAMP_FET3 is rated for ±12 V",
+  "inductors above 10 mH are not available on smd_pcb".
+
+Feedback never makes claims about designs that were not simulated, such as
+"this topology is at its limit" or "a passive design cannot reach this".
+Reliably defining when a topology class is exhausted would mean reasoning
+over every value combination and variant of it, which the harness cannot
+verify. It would also be wrong whenever the harness simply did not think of
+something: in the passive-only 50 kHz run, a different passive arrangement
+might well reach the gain the series RLC could not. That reasoning is the
+design work, and it stays with the model, for the same reason the harness
+never searches for component values. Any new hint or diagnosis text should be
+checked against this rule: if it cannot be traced to a simulation of this
+circuit, or to the catalogue or spec, it does not belong in the feedback.
+
+The rule is enforced by keeping all such text in one place,
+`src/spice_agent/hints.py`, the **hint catalogue**. Each hint carries:
+- its **kind** (fact, derived, catalogue, explanation, rule of thumb);
+- **when it applies** and **where it stops being valid**;
+- **why** it holds, and its **source**.
+
+The code that measures still decides *when* a hint fires (`verify.py`,
+`diagnosis.py`, `bias.py`, ...), but takes the *words* from the catalogue
+(`render("stopband.rolloff_per_order")`), which prefixes every rule of thumb
+with its label. `HINTS.md` is generated from it (`python -m
+spice_agent.hints`). `tests/test_hints.py` checks four things:
+- every hint is documented and used;
+- no rule of thumb renders unlabelled, and no model-facing string elsewhere
+  says "rule of thumb";
+- no hint uses phrasing that claims things about untested designs;
+- `HINTS.md` is current.
+
 ## The pipeline
 
 ```
@@ -58,7 +98,7 @@ are the model's job to derive.
 | `simulation/spec.py` | `DesignSpec` — the requirement model, including the judged window, the peaking limit and the terminations. |
 | `simulation/verify.py` | `check_filter_spec` — the verdict, and the feedback text. |
 | `simulation/diagnosis.py` | Why a non-ideal design failed: design vs construction, per-parasitic-group and per-component attribution, part self-resonances. Levels `full` / `basic` / `off`. |
-| `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call, including the diagnosis. |
+| `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call, including the diagnosis. For a notch spec every sweep is refined around its minimum first (`refine_notch`), so the depth is not limited by the grid. |
 | `agent/analysis.py` | `analysis_for(spec)` — which AC sweep a spec is simulated with. A leaf module so prompts, loop and CLI need not import each other. |
 | `agent/rate_limit.py` | Pacing and retry for the Gemini API. Knows nothing about circuits. |
 | `agent/prompts.py` | The design brief. Pure string building, so it can be asserted. |
@@ -72,6 +112,10 @@ are the model's job to derive.
 | `runlog.py` | `RunRecorder` — one folder per agent run with every prompt, reply, netlist, sweep and verdict. |
 | `plotting.py` | Annotated Bode plot; overlays the ideal response for non-ideal technologies. |
 | `run_plot.py` | `history.png` for a run folder: all iterations overlaid, plus a component/metric table. Reads only the saved files. |
+| `models/opamps.py` | The op-amp library: `OpampModel` parameters, the `.subckt` generated from them, the prompt summary. **Add parts here.** |
+| `simulation/raw.py` | ASCII raw files from ngspice (`write`): the operating point today, transient later. |
+| `simulation/bias.py` | `check_bias`: saturation, input range, DC paths and supply rating of every op-amp, from the operating point. |
+| `hints.py` | The hint catalogue: every piece of advice and explanation the model is given, documented (kind, when it applies, validity, why, source). Generates `HINTS.md`. **Edit advice text here.** |
 | `paths.py` | Finding ngspice and LTspice. Override here or by env var. |
 | `units.py` | SPICE value parsing (`"23.87m"` → `0.02387`). |
 | `templates.py` | Nine hand-written reference netlists with known behaviour. |
@@ -80,6 +124,47 @@ Import from a package, not its modules — `from spice_agent.simulation import
 DesignSpec` — so the internal split stays an implementation detail.
 
 ## Design decisions worth knowing
+
+**Multi-pin parts are named pins over the same `nodes` list.** An op-amp is
+`{"type": "opamp", "part": ..., "pins": {...}}`. `Component` derives `nodes`
+from the pins in the subcircuit's order, so everything that walks nodes (the
+expansion, the DC-path graph, the netlist) works unchanged. Only code that
+assumed exactly two nodes had to learn about `MULTI_PIN`. Pin order matters
+(in+ vs in-), so repeat detection and diagnosis grouping keep it.
+
+**Constraints decide passive vs active, never the prompt.** Rails make
+op-amps *allowed*. The prompt then offers both options with equal weight
+and a TRADE-OFFS note built from the spec's own numbers (`prompts.
+build_tradeoff_note`). The checks that actually separate the two are
+enforced: `simulation/availability.py` applies the technology's
+`max_practical_inductance` (`NOT BUILDABLE`), and
+`bias.check_supply_budget` applies `max_supply_current_a` per rail
+(`OVER BUDGET`). Both still let the design be simulated and reported, and
+both are design-level failures for the diagnosis. Catalogue properties of
+a grade (supply rating, quiescent current) bind on every technology;
+electrical behaviour follows the technology. When the diagnosis names an
+op-amp, `diagnosis.grade_advice` lists only faster grades rated for these
+rails and within the budget, or says there are none and points to lower Q
+per stage. Advice the model could not act on once sent a live run off to a
+passive design it could not finish.
+
+**The model never writes a model, and never chooses physics.** It picks an
+op-amp *grade* (`SELECTABLE_OPAMPS`), which plays the role a value plays for a
+passive. The technology then decides the simulation, exactly as for passives:
+`ideal` swaps every op-amp for `IDEAL_OPAMP` in `Circuit.to_netlist` (and the
+bias check judges against the ideal part's limits), while a real technology
+inlines the grade's `.subckt` and adds pin leads. `IDEAL_OPAMP` is refused at
+the tool boundary (`call_simulate_circuit_tool`): offered next to real
+grades, the model picked it every time. The library parameterises generic
+classes of part from typical datasheet figures, so it is ours to commit;
+vendor models are not bundled.
+
+**Active circuits are judged at their bias point first.** An AC sweep is a
+linearisation, so a saturated op-amp still yields a smooth curve. When a
+circuit has active parts, the control block solves `op` and writes it as an
+ASCII raw file before the AC sweep. `bias.check_bias` reads it against each
+part's library limits, and a bias failure fails the design whatever the AC
+result says. Passive circuits run exactly as before (no `op`).
 
 **`spec.py` and `verify.py` are deliberately adjacent.** Every field added to
 `DesignSpec` needs a matching branch in `check_filter_spec`, and a field with no
@@ -251,8 +336,10 @@ would otherwise be filed as live runs.
 - **AC analysis only.** `AnalysisSpec` raises on anything else, and
   `run_ngspice_ac` assumes the `vdb`/`vp` column layout. Transient support
   means a second analysis path and a second parser.
-- **Two-terminal passives only.** No op-amps or transistors: that needs
-  `.model`/`.subckt` support and relaxing `Component`'s two-node assumption.
+- **Op-amps only (stage 1), AC plus operating point.** No transistors and
+  no transient analysis yet. The op-amp models are generic single-pole
+  macromodels with no offset or noise. Op-amp circuits get no `.asc`
+  schematic.
 - **Phase and absolute passband level are measured but never checked.**
   Peaking above the passband is (`max_peaking_db`, default 3 dB). That limit
   exists because a live breadboard run was accepted with +12 dB of resonant

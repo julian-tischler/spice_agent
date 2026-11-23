@@ -19,6 +19,8 @@ from spice_agent.agent.analysis import analysis_for
 from spice_agent.agent.prompts import build_system_prompt
 from spice_agent.agent.rate_limit import RateLimiter, RetryPolicy
 from spice_agent.agent.tool_schema import SIMULATE_CIRCUIT_TOOL
+from spice_agent.models import SELECTABLE_OPAMPS
+from spice_agent.hints import render
 from spice_agent.runlog import RunRecorder
 from spice_agent.simulation import DesignSpec, simulate_and_verify
 
@@ -108,6 +110,9 @@ def design_key(args: dict):
     try:
         parts = []
         for c in args["components"]:
+            if "pins" in c:          # multi-pin: pin order matters (in+ vs in-)
+                parts.append((c["type"], c.get("part"), tuple(sorted(c["pins"].items()))))
+                continue
             value = c["value"]
             if c["type"] not in ("voltage_source", "current_source"):
                 value = float(f"{parse_spice_value(value):.6g}")
@@ -143,11 +148,8 @@ class RepeatGuard:
 
 def repeated_result(earlier: dict, guard: RepeatGuard) -> dict:
     """The answer to a resubmitted design: not simulated again."""
-    msg = (f"REPEATED DESIGN: this circuit is identical to iteration "
-           f"{earlier['iteration']} (only ids, order or title may differ), so it was "
-           f"not simulated again. That attempt failed with: "
-           f"{earlier['result'].get('message', '')} Submitting it again cannot pass "
-           f"- change the design.")
+    msg = render("loop.repeated_design", n=earlier["iteration"],
+                 message=earlier["result"].get("message", ""))
     if guard.consecutive >= MAX_CONSECUTIVE_REPEATS - 1:
         msg += (" One more identical submission ends the run."
                 if not guard.stalled else " This was the second in a row: the run stops.")
@@ -170,6 +172,19 @@ def call_simulate_circuit_tool(args: dict, spec: DesignSpec, capture: dict | Non
     }
     if capture is not None:
         capture["circuit_json"] = circuit_json
+
+    if (spec.powered and not spec.allow_active
+            and any(isinstance(c, dict) and c.get("type") == "opamp"
+                    for c in args["components"])):
+        return {"passed": False, "simulation_failed": True,
+                "message": render("loop.reject_passive_only")}
+    ungraded = sorted({c.get("part") for c in args["components"]
+                       if isinstance(c, dict) and c.get("type") == "opamp"
+                       and c.get("part") not in SELECTABLE_OPAMPS})
+    if ungraded:
+        return {"passed": False, "simulation_failed": True,
+                "message": render("loop.reject_ideal_opamp", parts=ungraded,
+                                  grades=list(SELECTABLE_OPAMPS))}
 
     try:
         result = simulate_and_verify(circuit_json, spec, capture=capture, diagnose=diagnose)

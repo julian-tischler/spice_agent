@@ -13,9 +13,12 @@ show what was actually simulated rather than the idealised design.
 
 from __future__ import annotations
 
+from spice_agent.models import OPAMP_PINS, get_opamp
+
 from spice_agent.circuit import (
     COMPONENT_PREFIXES,
     EXTERNAL_IDS,
+    MULTI_PIN,
     Circuit,
     Component,
     expand_with_parasitics,
@@ -59,6 +62,11 @@ def as_built_circuit(circuit: Circuit, technology) -> Circuit:
     for line in lines:
         if line.startswith("*"):
             continue
+        if line[0].upper() == "X":                     # a library part instance
+            ident, *nodes, part = line.split()
+            components.append(Component(ident, "opamp", part=part,
+                                        pins=dict(zip(OPAMP_PINS, nodes))))
+            continue
         ident, n1, n2, *value = line.split()
         components.append(Component(
             id=ident,
@@ -91,6 +99,9 @@ def to_ltspice_netlist(circuit: Circuit, include_print: bool = True,
     circuit.validate()
     lines = [circuit.title]
     lines += [c.to_spice_line() for c in circuit.components]
+    # library parts travel inside the file, so it runs anywhere
+    for part in dict.fromkeys(c.part for c in circuit.components if c.type in MULTI_PIN):
+        lines.append(get_opamp(part).subckt())
     lines.append(analysis_directive(circuit))
     if include_print:
         node = circuit.analysis.output_node

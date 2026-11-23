@@ -46,7 +46,7 @@ REQUIREMENT = "#898781"
 NOT_JUDGED = "#e1e0d9"
 GOOD = "#006300"            # success text ink, used with a "PASS" label
 
-PREFIX = {"resistor": "R", "capacitor": "C", "inductor": "L"}
+PREFIX = {"resistor": "R", "capacitor": "C", "inductor": "L", "opamp": "U"}
 
 
 def _ramp(n: int) -> list[str]:
@@ -97,7 +97,12 @@ def component_table(iterations: list[dict]) -> tuple[list[str], list[list[str]]]
         for c in it["circuit"]["components"]:
             if c["type"] not in PREFIX:
                 continue
-            key = f"{PREFIX[c['type']]}  {' - '.join(c['nodes'])}"
+            if c.get("pins"):
+                p = c["pins"]
+                key = f"U  +{p.get('in+')} -{p.get('in-')} >{p.get('out')}"
+                c = dict(c, value=c.get("part", "?"))
+            else:
+                key = f"{PREFIX[c['type']]}  {' - '.join(c['nodes'])}"
             rows.setdefault(key, [dict() for _ in iterations])
             cell = rows[key][col]
             cell[c["value"]] = cell.get(c["value"], 0) + 1
@@ -133,6 +138,14 @@ def metric_rows(spec: DesignSpec, iterations: list[dict]) -> tuple[list[str], li
     if spec.filter_type != "bandpass":
         row("peaking", lambda r: "-" if r.get("passband_peaking_db") is None
             else f"{r['passband_peaking_db']:+.1f} dB")
+    if any(it["result"].get("bias") for it in iterations):
+        def dc(r):
+            b = r.get("bias")
+            if not b:
+                return "-"
+            outs = ", ".join(f"{p['id']} {p['v_out']:+.2f} V" for p in b["parts"])
+            return (outs or "no op") + ("" if b["ok"] else " (BIAS)")
+        row("op-amp DC out", dc)
     row("verdict", lambda r: "PASS" if r.get("passed") else
         ("sim failed" if r.get("simulation_failed") else
          f"repeat of {r['repeat_of']}" if r.get("repeated_design") else "fail"))

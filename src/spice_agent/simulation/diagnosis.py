@@ -58,6 +58,7 @@ import math
 import time
 
 from spice_agent.circuit import Circuit, get_profile
+from spice_agent.hints import render
 from spice_agent.simulation import metrics
 from spice_agent.simulation.spec import DesignSpec
 from spice_agent.simulation.verify import (
@@ -79,48 +80,32 @@ LEVELS = ("full", "basic", "off")
 # per-component check named L1; this group says WHY. The inductor's
 # parallel loss resistance (Q at self-resonance) stays with the winding
 # capacitance - it only shapes that resonance.
+
+
+def _advice(key: str) -> str:
+    """A group's explanation (a fact) followed by its remedy (a rule of thumb),
+    both from the hint catalogue."""
+    return (render(f"parasitic.{key}.why") + ". "
+            + render(f"parasitic.{key}.remedy", capital=True))
+
+
 ABLATIONS = {
-    "input-output stray coupling": (
-        ("io_coupling_c",),
-        "signal bypasses the whole filter through stray capacitance from 'in' "
-        "to 'out', so more poles cannot help; only a lower high-frequency "
-        "impedance at 'out' does: end the filter in a shunt capacitor at 'out' "
-        "(a ladder ending in a series inductor leaves 'out' with nothing but "
-        "the load to ground), ideally several in parallel, since N in parallel "
-        "divide their lead inductance by N"),
-    "inductor self-resonance (winding capacitance)": (
-        ("inductor_winding_c",),
-        "an inductor becomes a capacitor above its self-resonance, and smaller "
-        "inductors resonate higher; lower the impedance level (smaller L with "
-        "proportionally larger C and smaller R keeps the same cutoff) - but "
-        "not so far that the parts' own series resistance (a few ohm for a "
-        "leaded inductor) becomes comparable to it - or split one inductor "
-        "into several smaller ones in series"),
+    "input-output stray coupling": (("io_coupling_c",), _advice("coupling")),
+    "inductor self-resonance (winding capacitance)": (("inductor_winding_c",),
+                                                      _advice("winding_c")),
     "losses (inductor winding resistance, capacitor ESR, contact resistance)": (
         ("inductor_dcr_per_sqrt_h", "capacitor_esr", "contact_resistance"),
-        "the parts' own series resistance is significant against the circuit's "
-        "impedance level: an inductor's winding resistance grows with its "
-        "inductance and adds to every resistor in series with it. Raise the "
-        "impedance level (larger L, smaller C, larger R for the same cutoff) "
-        "so those few ohms no longer matter, or account for them in the "
-        "resistor values"),
-    "capacitor ESL": (
-        ("capacitor_esl",),
-        "a capacitor becomes an inductor above its self-resonance; use several "
-        "smaller capacitors in parallel instead of one large one"),
-    "lead / interconnect inductance": (
-        ("interconnect_l_per_terminal", "resistor_series_l"),
-        "every connection adds series inductance, which spoils shunt "
-        "capacitors at high frequency; parallel shunt paths divide it"),
-    "stray node capacitance": (
-        ("interconnect_node_c", "resistor_shunt_c"),
-        "stray capacitance across parts gives the signal a high-frequency "
-        "path around them"),
+        _advice("losses")),
+    "capacitor ESL": (("capacitor_esl",), _advice("esl")),
+    "lead / interconnect inductance": (("interconnect_l_per_terminal", "resistor_series_l"),
+                                       _advice("leads")),
+    "stray node capacitance": (("interconnect_node_c", "resistor_shunt_c"),
+                               _advice("node_c")),
 }
 
 # The check diagnosed when several fail: the first failing one in this order.
-CHECK_PRIORITY = ("stopband", "band shape", "notch symmetry", "peaking",
-                  "notch depth", "bandwidth", "frequency")
+CHECK_PRIORITY = ("availability", "supply current", "stopband", "band shape", "notch symmetry", "peaking",
+                  "notch depth", "passband gain", "bandwidth", "frequency")
 
 LOSSES = "losses (inductor winding resistance, capacitor ESR, contact resistance)"
 
@@ -148,6 +133,12 @@ def margins(result: dict, spec: DesignSpec) -> dict[str, tuple[float, str]]:
         m["bandwidth"] = (tol - abs(result["bandwidth_error_pct"]), "%")
     if result.get("stopband_atten_db") is not None:
         m["stopband"] = (result["stopband_atten_db"] - spec.stopband_atten_db, "dB")
+    if result.get("availability") is not None:
+        m["availability"] = (1.0 if result["availability"]["ok"] else -1.0, "")
+    if (result.get("supply") or {}).get("margin_a") is not None:
+        m["supply current"] = (result["supply"]["margin_a"] * 1e3, "mA")
+    if result.get("passband_gain_error_db") is not None:
+        m["passband gain"] = (spec.gain_tolerance_db - abs(result["passband_gain_error_db"]), "dB")
     if result.get("passband_peaking_db") is not None and spec.max_peaking_db is not None:
         m["peaking"] = (spec.max_peaking_db - result["passband_peaking_db"], "dB")
     if result.get("rejection_at_judge_lo_db") is not None:
@@ -174,6 +165,7 @@ def _describe(check: str, margin: float, spec: DesignSpec) -> str:
         "notch depth": lambda: f"{margin + spec.min_notch_depth_db:.1f} dB notch depth",
         "bandwidth": lambda: f"bandwidth {tol - margin:.1f}% off target",
         "frequency": lambda: f"{tol - margin:.1f}% off target",
+        "passband gain": lambda: f"{spec.gain_tolerance_db - margin:.2f} dB from the gain target",
     }[check]()
 
 
@@ -228,9 +220,9 @@ def _components_report(circuit: Circuit, profile, spec: DesignSpec,
         if c.type == "inductor" and profile.inductor_dcr(value) > 0:
             entry["series_resistance_ohm"] = float(profile.inductor_dcr(value))
         if where == "stopband" and srf < band[0] and spec.filter_type == "lowpass":
-            entry["note"] = f"below the stopband: {above} across the whole stopband"
+            entry["note"] = render("diag.srf_below_stopband", above=above)
         elif band[0] <= srf <= band[1]:
-            entry["note"] = f"inside the {where}: {above} above it"
+            entry["note"] = render("diag.srf_inside", where=where, above=above)
         out.append(entry)
     return out
 
@@ -243,10 +235,13 @@ def component_groups(circuit: Circuit) -> list[dict]:
     """
     groups: dict[tuple, dict] = {}
     for c in circuit.components:
-        if c.type not in ("resistor", "capacitor", "inductor"):
+        if c.type not in ("resistor", "capacitor", "inductor", "opamp"):
             continue
-        key = (c.type, frozenset(c.nodes), c.value)
-        g = groups.setdefault(key, {"ids": [], "value": c.value, "nodes": list(c.nodes)})
+        # an op-amp's pins are not interchangeable: keep their order
+        key = (c.type, tuple(c.nodes) if c.type == "opamp" else frozenset(c.nodes),
+               c.value)
+        g = groups.setdefault(key, {"ids": [], "value": c.value, "nodes": list(c.nodes),
+                                    "type": c.type})
         g["ids"].append(c.id)
     out = []
     for g in groups.values():
@@ -277,9 +272,10 @@ def diagnose(circuit: Circuit, spec: DesignSpec, result: dict, sweep,
     if level not in LEVELS:
         raise ValueError(f"diagnosis level must be one of {LEVELS}, not {level!r}")
     profile = get_profile(spec.technology)
-    if (level == "off" or profile.is_ideal or result.get("passed")
-            or result.get("simulation_failed")):
+    if level == "off" or result.get("passed") or result.get("simulation_failed"):
         return None
+    if profile.is_ideal:
+        return None          # ideal parts throughout: nothing to attribute
     t0 = time.monotonic()
 
     ideal_df = sweep("ideal")
@@ -288,6 +284,7 @@ def diagnose(circuit: Circuit, spec: DesignSpec, result: dict, sweep,
         "technology": profile.name,
         "level": level,
         "ideal_parts_passed": bool(ideal.get("passed")),
+        "has_active_parts": bool(circuit.active_parts),
     }
     for key in ("cutoff_hz", "stopband_atten_db", "center_hz", "notch_hz",
                 "notch_depth_db", "passband_peaking_db"):
@@ -304,8 +301,12 @@ def diagnose(circuit: Circuit, spec: DesignSpec, result: dict, sweep,
     failing = [c for c in CHECK_PRIORITY if c in have and have[c][0] < 0]
     design = [c for c in failing if ideal_have.get(c, (BROKEN, ""))[0] < 0]
     built = [c for c in failing if c not in design]
+    # Checks ideal parts would miss but this design passes as built: the
+    # parasitics happen to help there. Worth knowing before changing values.
+    ideal_only = [c for c in CHECK_PRIORITY
+                  if c not in failing and ideal_have.get(c, (0.0, ""))[0] < 0]
     report.update(failed_checks=failing, design_failures=design,
-                  parasitic_failures=built)
+                  parasitic_failures=built, ideal_only_failures=ideal_only)
     if built:
         check = built[0]
         unit = have[check][1]
@@ -362,6 +363,7 @@ def diagnose(circuit: Circuit, spec: DesignSpec, result: dict, sweep,
             for g in component_groups(circuit):
                 m, passed = score(sweep(spec.technology, ideal_ids=g["ids"]))
                 per_part.append({"ids": g["ids"], "label": g["label"],
+                                 "part": g["value"] if g["type"] == "opamp" else None,
                                  "margin_if_ideal": float(m),
                                  "recovered": float(m - base),
                                  "passes_if_ideal": passed})
@@ -372,6 +374,34 @@ def diagnose(circuit: Circuit, spec: DesignSpec, result: dict, sweep,
     report["duration_s"] = round(time.monotonic() - t0, 3)
     report["summary"] = _summary(report, spec)
     return report
+
+
+def grade_advice(part: str, spec: DesignSpec) -> str:
+    """
+    What to do when an op-amp grade is the limit - naming only grades that
+    are faster, rated for THESE rails and within the supply-current budget,
+    since the model can change neither the rails nor the budget. "Choose a
+    faster grade" with none available sent a live run (2026-11-23) off to a
+    passive design it could not finish.
+    """
+    from spice_agent.models import OPAMPS, SELECTABLE_OPAMPS
+
+    current = OPAMPS[part]
+    total = spec.supply_pos_v - spec.supply_neg_v
+    budget = spec.max_supply_current_a
+    options = [OPAMPS[n] for n in SELECTABLE_OPAMPS
+               if OPAMPS[n].gbw_hz > current.gbw_hz
+               and OPAMPS[n].supply_min_v <= total <= OPAMPS[n].supply_max_v
+               and (budget is None or OPAMPS[n].quiescent_a <= budget)]
+    rails = f"{spec.supply_pos_v:g} V / {spec.supply_neg_v:g} V"
+    within = "" if budget is None else f" within {budget * 1e3:g} mA"
+    if options:
+        names = ", ".join(f"{m.name} ({m.gbw_hz / 1e6:g} MHz)" for m in options)
+        return (render("diag.grade.faster", rails=rails, within=within, names=names)
+                + "; " + render("diag.grade.less_q_otherwise"))
+    return (render("diag.grade.none", part=part, gbw=f"{current.gbw_hz / 1e6:g}",
+                   rails=rails, within=within)
+            + "; " + render("diag.grade.less_q"))
 
 
 def _impact_text(d: dict, report: dict, spec: DesignSpec) -> str:
@@ -396,20 +426,19 @@ def _summary(report: dict, spec: DesignSpec) -> str:
     bits = []
     check = report.get("check")
     design, built = report.get("design_failures", []), report.get("parasitic_failures", [])
-    if report["ideal_parts_passed"]:
-        bits.append("With ideal parts this exact design would PASS, so the failure is "
-                    "caused by the construction parasitics, not by the design itself")
+    if report["ideal_parts_passed"] and report.get("has_active_parts"):
+        bits.append(render("diag.ideal_pass_active"))
+    elif report["ideal_parts_passed"]:
+        bits.append(render("diag.ideal_pass"))
     elif design and not built:
-        bits.append(f"The {', '.join(design)} failure is in the design itself - ideal parts "
-                    f"fail it too - so fix that first (see above); parasitics are not the "
-                    f"cause")
+        bits.append(render("diag.design_only", checks=", ".join(design)))
     elif design:
-        bits.append(f"Two kinds of failure: {', '.join(design)} fails even with ideal parts "
-                    f"(a design problem, see above), while {', '.join(built)} fails only "
-                    f"because of the construction parasitics")
-    else:
-        bits.append("Ideal parts would still fail a check this design passes as built, "
-                    "so compare both before changing values")
+        bits.append(render("diag.mixed", design=", ".join(design), built=", ".join(built)))
+    elif built:
+        only = report.get("ideal_only_failures")
+        bits.append(render("diag.built_only", built=", ".join(built),
+                           ideal_only=render("diag.ideal_only", checks=", ".join(only))
+                           if only else ""))
     if check:
         bits.append(f"Diagnosed (parasitic) check: {check}, currently "
                     f"{_describe(check, report['margin'], spec)}")
@@ -418,19 +447,19 @@ def _summary(report: dict, spec: DesignSpec) -> str:
         fixers = [p for p in parts if p["passes_if_ideal"]]
         helpful = [p for p in parts if p["recovered"] >= MIN_RELEVANT_DB]
         if fixers:
-            bits.append("Per component (each made ideal on its own, the rest as built): "
-                        + ", ".join(p["label"] for p in fixers)
-                        + (" alone would make the design PASS - that is the part to change"
-                           if len(fixers) == 1 else " would each alone make it PASS"))
+            verb = (" alone would make the design PASS - that is the part to change"
+                    if len(fixers) == 1 else " would each alone make it PASS")
+            bits.append(render("diag.per_component.fixer",
+                               labels=", ".join(p["label"] for p in fixers), verb=verb)
+                        + "".join(f"; {grade_advice(p['part'], spec)}"
+                                  for p in fixers if p.get("part")))
         elif helpful:
-            bits.append("Per component (each made ideal on its own, the rest as built): "
-                        + ", ".join(f"{p['label']} +{p['recovered']:.1f} {report['unit']}"
-                                    for p in helpful[:3])
-                        + "; no single part fixes it alone")
+            bits.append(render("diag.per_component.partial", items=", ".join(
+                f"{p['label']} +{p['recovered']:.1f} {report['unit']}"
+                for p in helpful[:3])))
         else:
-            bits.append("Per component: no single part recovers more than "
-                        f"{MIN_RELEVANT_DB:g} {report['unit']} on its own - the cause is "
-                        "the layout as a whole (coupling, leads), not one part")
+            bits.append(render("diag.per_component.none", limit=f"{MIN_RELEVANT_DB:g}",
+                               unit=report["unit"]))
     top = report.get("limiting_parasitics") or []
     if top:
         t = top[0]

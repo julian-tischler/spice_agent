@@ -7,7 +7,7 @@ in, the exporter's layout logic - keeps working on the ideal circuit the
 designer actually chose.
 """
 
-from spice_agent.circuit.model import GROUND, SOURCE_NODE
+from spice_agent.circuit.model import GROUND, MULTI_PIN, SOURCE_NODE
 from spice_agent.units import parse_spice_value
 
 
@@ -78,7 +78,6 @@ def expand_with_parasitics(components, profile, input_node: str,
         return inner
 
     for comp in components:
-        n1, n2 = comp.nodes
         value = comp.value
 
         if comp.type in ("voltage_source", "current_source") or comp.id in ideal_ids:
@@ -86,6 +85,15 @@ def expand_with_parasitics(components, profile, input_node: str,
             lines.append(comp.to_spice_line())
             continue
 
+        if comp.type in MULTI_PIN:
+            # The part's own non-idealities live in its library model; the
+            # board adds one lead (and contact) per pin - including the
+            # supply pins, which is where breadboard rail wiring shows up.
+            inner = [terminal(comp.id, n, f"p{i}") for i, n in enumerate(comp.nodes)]
+            lines.append(f"{comp.spice_name} {' '.join(inner)} {comp.part}")
+            continue
+
+        n1, n2 = comp.nodes
         a = terminal(comp.id, n1, "a")
         b = terminal(comp.id, n2, "b")
         v = parse_spice_value(value)

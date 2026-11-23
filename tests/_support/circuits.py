@@ -43,13 +43,24 @@ RLC_BANDPASS = {         # f0 ~ 5033 Hz, BW ~ 1591 Hz
         {"id": "R1", "type": "resistor", "nodes": ["out", "0"], "value": "100"},
     ],
 }
-RLC_NOTCH = {            # f0 ~ 5033 Hz, depth ~ 31 dB
+RLC_NOTCH = {            # f0 ~ 5033 Hz, ideal zero (the 100/dec grid alone read ~31 dB)
     "title": "RLC notch",
     "components": [
         _src(),
         {"id": "R1", "type": "resistor", "nodes": ["in", "out"], "value": "100"},
         {"id": "L1", "type": "inductor", "nodes": ["out", "n1"], "value": "10m"},
         {"id": "C1", "type": "capacitor", "nodes": ["n1", "0"], "value": "100n"},
+    ],
+}
+
+RLC_NOTCH_LOSSY = {      # RLC_NOTCH + 3.3 ohm in the LC branch: 20log(103.3/3.3) = 29.9 dB
+    "title": "RLC notch, lossy branch",
+    "components": [
+        _src(),
+        {"id": "R1", "type": "resistor", "nodes": ["in", "out"], "value": "100"},
+        {"id": "L1", "type": "inductor", "nodes": ["out", "n1"], "value": "10m"},
+        {"id": "R2", "type": "resistor", "nodes": ["n1", "n2"], "value": "3.3"},
+        {"id": "C1", "type": "capacitor", "nodes": ["n2", "0"], "value": "100n"},
     ],
 }
 TWIN_T_NOTCH = {         # f0 ~ 1591 Hz, depth ~ 53 dB

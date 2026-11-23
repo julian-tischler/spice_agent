@@ -123,6 +123,11 @@ disagree.
 | `max_peaking_db` | `3.0` | max passband gain above its level (`--max-peaking`, `off` = `None`); not for bandpass |
 | `source_ohm` | `0.0` | source resistance the harness inserts before `in` (`--source-ohm`) |
 | `load_ohm` | `None` | load resistance the harness puts on `out` (`--load-ohm`); `None` = unloaded |
+| `supply_pos_v` / `supply_neg_v` | `None` | supply rails at nodes `vcc` / `vee` (`--supply`, or `--supply-pos/--supply-neg`); `None` = passive only |
+| `passband_gain_db` | `None` | required passband gain (peak gain for bandpass), `--gain`; `None` = not checked |
+| `gain_tolerance_db` | `1.0` | tolerance on that gain, `--gain-tol` |
+| `max_supply_current_a` | `None` | max current from each rail (`--max-supply-current 1m`); `None` = no budget |
+| `allow_active` | `True` | `False` (`--passive-only`) forbids op-amps even when rails exist |
 
 `describe()` renders it as the line the model actually reads:
 
@@ -167,6 +172,94 @@ parasitics, and are written into the exported `.cir`/`.asc`. They are
 reserved, so the model cannot add, remove or change them, and the prompt
 tells it they are there. All checks are relative to the resulting passband
 level, so a 50 Ω / 50 Ω ladder's −6.02 dB passband is correct, not a failure.
+
+### Active parts: op-amps
+
+Give the spec supply rails and the model **may** use op-amps; it is not
+told to:
+
+```bash
+python -m spice_agent.agent --type bandpass --target 10000 --bandwidth 2000 \
+    --supply 12 --gain 0 --max-supply-current 1m
+```
+
+- **Rails mean "allowed", never "preferred".** The spec describes what the
+  filter must do and the world it lives in, never how to build it. With rails,
+  the prompt offers passives and op-amps as equal options, with a passive and
+  an active hint each. It adds a TRADE-OFFS note filled with this spec's own
+  numbers: gain above 0 dB needs an op-amp; a load favours an op-amp output;
+  "a series-RLC band-pass with Q = 10 at 50 kHz needs about 31.8 mH, but
+  inductors are available only up to 10 mH on smd_pcb"; the current budget;
+  op-amp swing and gain-bandwidth limits; passives need no power. With the
+  earlier, one-sided prompt the model used an op-amp first in all nine powered
+  live runs, whatever the requirements said. `--passive-only` keeps rails in
+  the spec but forbids op-amps.
+- **What exists is enforced.** Inductors larger than the technology offers
+  (10 mH on `smd_pcb`, 100 mH on `breadboard`, unlimited on `ideal`) fail the
+  design as `NOT BUILDABLE`. The design is still simulated, so the model sees
+  its response, and the diagnosis files it as a design problem.
+- **A supply-current budget** (`--max-supply-current`, per rail) is measured
+  from the operating point. On ideal technology, where op-amps are simulated
+  ideal and draw nothing, each grade's catalogue current is charged instead.
+  Exceeding it fails the design as `OVER BUDGET`, naming each op-amp's share.
+  A passive design draws nothing.
+- **Catalogue properties bind on every technology.** A grade's supply rating
+  and supply current are properties of the part, so they apply even when the
+  op-amp is simulated as ideal. Electrical behaviour (gain-bandwidth, swing,
+  bias current) follows the technology.
+
+- **The model chooses a grade; the technology decides the physics.** This is
+  the same split as for passives. A passive is a type plus a value, and
+  `--technology` decides whether it is simulated ideal or with its
+  parasitics. An op-amp is a type plus a **grade**, a real design trade-off
+  in bandwidth, slew rate, supply range and bias current:
+
+  | Grade | Class | GBW | Slew | Swing / input range | Supply |
+  |---|---|---|---|---|---|
+  | `OPAMP_GP1` | bipolar general purpose (LM358/741 class) | 1 MHz | 0.5 V/µs | 1.5 V from each rail | 3–32 V |
+  | `OPAMP_FET3` | JFET input (TL07x class) | 3 MHz | 13 V/µs | 1.5 V / 3 V from each rail | 10–36 V |
+  | `OPAMP_RR10` | CMOS rail-to-rail | 10 MHz | 6 V/µs | rail-to-rail | 2.7–5.5 V |
+
+  - With `--technology ideal`, every op-amp is simulated as the ideal one,
+    just as every inductor is then perfect.
+  - With a real technology, the grade's macromodel is used, plus a lead on
+    every pin.
+
+  `OPAMP_IDEAL` (1 GHz, rail-to-rail) is therefore not on the menu. It is
+  the ideal technology's expansion and the diagnosis's "what if this op-amp
+  were ideal" part. When it *was* offered, all four live runs picked it.
+  Each grade is a generic macromodel written for this project from typical
+  datasheet figures, so it can be committed. Vendor models are not bundled:
+  their licences generally forbid redistribution and some are encrypted.
+  The model wires the pins (`{"type": "opamp", "part": "OPAMP_FET3", "pins":
+  {"in+", "in-", "vcc", "vee", "out"}}`), and the harness inlines the
+  `.subckt`.
+- **The rails belong to the harness.** `V_SUPPLY_POS` / `V_SUPPLY_NEG` hold
+  `vcc` / `vee`, ideal and outside the parasitics. The design may connect to
+  the rails but never drive them. With no rails in the spec, the prompt says
+  "passive only", and an op-amp is answered with that.
+- **The DC operating point is checked.** An AC sweep linearises around the
+  bias point, so it draws a believable curve even for an op-amp pinned at a
+  rail. Every active run therefore solves `op` first, and a design fails with
+  `BIAS PROBLEM` when:
+  - an output sits at its swing limit (saturated);
+  - an input leaves its common-mode range;
+  - an input has no DC path, the capacitor-coupled-input mistake: the bias
+    current charges the node until the output rails (−10.53 V on `OPAMP_GP1`
+    in the tests). This fails even with ideal technology, because the node's
+    DC level is then undefined;
+  - the part is on a supply it is not rated for (on every technology: the
+    rating belongs to the part).
+
+  The message names the cause.
+- **Grade limits are diagnosed.** On a real technology, the per-component
+  check also makes each op-amp ideal on its own. On `smd_pcb`, a 10 kHz MFB
+  band-pass passes with the `OPAMP_FET3` grade, but its bandwidth comes out
+  10.6% low with the 1 MHz `OPAMP_GP1`. The diagnosis says "U1 (OPAMP_GP1)
+  alone would make the design PASS … a faster grade, or less gain or Q per
+  stage".
+- `--gain` sets an absolute passband-gain target, since active filters can
+  have gain; without it only the relative checks apply.
 
 ### Why the stopband term matters
 
@@ -248,6 +341,10 @@ What is judged, and around what:
 | `--max-peaking DB` | `3` | passband peaking limit, or `off` |
 | `--source-ohm OHM` | `0` (ideal source) | fixed source resistance |
 | `--load-ohm OHM` | none (unloaded) | fixed load resistance |
+| `--supply V` | none (passive only) | ±V rails at `vcc` / `vee`; or `--supply-pos` / `--supply-neg` |
+| `--gain DB` / `--gain-tol DB` | not checked / `1` | absolute passband-gain target |
+| `--max-supply-current A` | no budget | max current per rail, e.g. `1m` |
+| `--passive-only` | off | no op-amps, even with rails |
 | `--diagnosis full\|basic\|off` | `full` | parasitics diagnosis of failed non-ideal designs |
 
 `--max-iterations` caps the budget (default 6 for Gemini, 5 for Claude) and
@@ -364,7 +461,12 @@ even begins. No choice of component values fixes that.
 
 Each failed iteration returns a verdict message written to be acted on, plus
 the measured numbers (rounded to 4 significant figures for the model; the run
-log keeps full precision). Depending on what failed, the message carries:
+log keeps full precision). All advice and explanation text, in the prompt and
+in the feedback, comes from one documented catalogue, `src/spice_agent/hints.py`.
+It is readable as [HINTS.md](HINTS.md) and states, for every hint, when it
+applies, where it stops being valid, why it holds and its source. Hints convey
+hard facts only, and rules of thumb are always labelled as such (see
+ARCHITECTURE.md). Depending on what failed, the message carries:
 
 - **Frequency miss:** the exact correction. Multiplying every L and C by
   k = measured / target moves the whole response onto target without changing
@@ -477,12 +579,12 @@ open is what was simulated — parasitics and all. On the breadboard profile a
 ## Testing
 
 ```bash
-python -m pytest -m "not live"   # 307 tests, needs only ngspice  (~75 s)
+python -m pytest -m "not live"   # 733 tests, needs only ngspice  (~100 s)
 python -m pytest -m ltspice      #  15 tests, drives LTspice.exe
 python -m pytest -m live         #   5 tests, calls Gemini; needs an API key
 ```
 
-312 total (the 15 LTspice tests are part of the "not live" set). The Claude
+738 total (the 15 LTspice tests are part of the "not live" set). The Claude
 backend is tested against a scripted runner, so no test calls `claude`. The LTspice and live tests skip themselves when the binary or the
 key is missing, so `python -m pytest` works on a bare checkout.
 
@@ -501,9 +603,18 @@ discards the most interesting output in the suite.
 overshoot, ringing or settling time — which are the things a customer actually
 complains about. Adding them means a second analysis path and a second parser.
 
-**Two-terminal passives only.** R, L, C and independent sources. No op-amps or
-transistors: that needs `.model`/`.subckt` support and relaxing `Component`'s
-two-node assumption.
+**Op-amps, but no transistors yet, and AC plus operating point only.**
+Op-amps come from the generic library. Transistors (stage 3) and transient
+behaviour (stage 2: slew-rate distortion, clipping at real signal levels,
+oscillation) are not simulated yet. The slew rate is in the models but nothing
+measures it.
+
+**The op-amp models are generic, not vendor-accurate.** They have one pole, no
+offset voltage, no noise, no output current limit and no supply rejection. A
+pass means "a part of this class would work", not "this exact part will".
+
+**No LTspice schematic for op-amp circuits.** The `.asc` export is skipped
+with a recorded reason; the `.cir` carries the whole circuit, models inline.
 
 **Passband level and phase are measured but never checked.** Peaking above the
 passband is checked (3 dB by default); the absolute level is not, and neither is
@@ -514,6 +625,15 @@ undamped L-C's peak is sharper than 100 points per decade can resolve, so the
 reported figure (+35 to +71 dB for the same circuit, depending on where the
 samples land) is a lower bound. That does not change the verdict, which is
 far over 3 dB either way.
+
+A notch had the same problem, and there it did change things, so a notch is
+refined. On the 100-per-decade grid an ideal series-RLC zero falls between
+two samples. Live, it read 31.5 dB instead of infinitely deep, so the
+diagnosis wrongly said "ideal parts fail it too" for a notch limited only by
+the inductor's winding resistance. For a notch spec, every sweep (the
+verdict's, each diagnosis variant's and the plot's) gets one extra dense
+linear sweep between the samples either side of its minimum. An ideal zero
+now reads about 100 dB, and a lossy notch reads its true depth.
 
 **Parasitic values are representative, not measured.** This is the biggest
 caveat. Inductor winding capacitance (3 pF SMD / 15 pF breadboard) and Q at
@@ -531,9 +651,10 @@ typical geometry. A tight layout beats them; a sloppy one is worse.
 lead inductance, since modelling them would mean per-component local grounds
 and so ground bounce — finer-grained than the rest of the model justifies.
 
-**Availability limits are advisory.** `max_practical_inductance` is recorded but
-unenforced: nothing stops the agent proposing a 23.87 mH inductor in an 0603
-package.
+**Only inductor size is checked for availability.** Inductors are limited
+per technology. Capacitor and resistor ranges are not, and neither are
+standard value series (E12/E24), which is the next step (a light passive
+catalogue).
 
 **Parasitic attribution is per group, not per pair.** Each group is measured
 on its own and by removal, and ranked by the larger effect. That catches both

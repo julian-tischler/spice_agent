@@ -224,7 +224,7 @@ SMD_PCB = TechnologyProfile(
     interconnect_node_c=0.3e-12,        # to the ground plane
     contact_resistance=0.0,             # soldered
     io_coupling_c=0.02e-12,             # a ground plane between them helps a lot
-    max_practical_inductance=10e-3,
+    max_practical_inductance=10e-3,     # about the largest SMD power inductor
 )
 
 BREADBOARD = TechnologyProfile(
@@ -245,7 +245,7 @@ BREADBOARD = TechnologyProfile(
     interconnect_node_c=2e-12,          # strip to everything around it
     contact_resistance=0.03,            # per spring contact, and variable
     io_coupling_c=2e-12,                # adjacent strips, no plane between
-    max_practical_inductance=float("inf"),
+    max_practical_inductance=100e-3,    # about the largest leaded choke on sale
 )
 
 PROFILES: dict[str, TechnologyProfile] = {

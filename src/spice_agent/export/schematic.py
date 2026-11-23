@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from spice_agent.circuit import GROUND, Circuit, Component
+from spice_agent.circuit.model import VCC, VEE
 from spice_agent.export.netlist import (
     analysis_directive,
     as_built_circuit,
@@ -346,7 +347,8 @@ def to_asc(circuit: Circuit) -> tuple[str, Layout]:
 
 def export(circuit_json: dict, asc_path: str | os.PathLike | None = None,
            cir_path: str | os.PathLike | None = None, technology=None, *,
-           source_ohm: float = 0.0, load_ohm: float | None = None) -> dict:
+           source_ohm: float = 0.0, load_ohm: float | None = None,
+           supply_pos: float | None = None, supply_neg: float | None = None) -> dict:
     """
     Convenience wrapper for the agent CLI: write whichever of .asc/.cir
     were requested from a circuit JSON dict. Returns a summary dict.
@@ -361,9 +363,20 @@ def export(circuit_json: dict, asc_path: str | os.PathLike | None = None,
     (R_SOURCE, R_LOAD) exactly as the simulation did, so the file is the
     circuit that was judged; both stay ideal in the as-built version.
     """
+    design = Circuit.from_dict(circuit_json)
+    # The rails are part of the world only when the design connects to them:
+    # a passive design on a powered spec leaves vcc / vee unconnected, and
+    # two floating supply sources would only clutter the files.
+    if not any(n in (VCC, VEE) for c in design.components for n in c.nodes):
+        supply_pos = supply_neg = None
     circuit = as_built_circuit(
-        Circuit.from_dict(circuit_json).terminated(source_ohm, load_ohm), technology)
+        design.terminated(source_ohm, load_ohm, supply_pos, supply_neg), technology)
     out: dict = {}
+    if asc_path is not None and circuit.active_parts:
+        # No op-amp symbol/pin geometry yet: skip the drawing rather than
+        # write a wrong one. The .cir still carries the whole circuit.
+        out["asc_skipped"] = "schematic export does not support op-amps yet"
+        asc_path = None
     if asc_path is not None:
         text, layout = to_asc(circuit)
         Path(asc_path).write_text(text, encoding="ascii")

@@ -240,6 +240,8 @@ class RunRecorder:
                              f"returncode: {capture.get('ngspice_returncode')}\n"
                              f"--- stdout ---\n{capture['ngspice_stdout']}\n"
                              f"--- stderr ---\n{capture['ngspice_stderr']}\n")
+        if capture.get("op") is not None:
+            self._write_json(f"{d}/{s}operating_point.json", capture["op"])
         sweep = capture.get("sweep")
         if sweep is not None and self.enabled:
             (self.root / d).mkdir(exist_ok=True)

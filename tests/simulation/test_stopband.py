@@ -145,7 +145,7 @@ def test_first_order_passes_cutoff_but_fails_stopband(sweeps):
     assert r["stopband_atten_db"] == pytest.approx(20.0, abs=0.5)
     assert r["stopband_required_atten_db"] == 40.0
     # feedback must point at the topology, not the component values
-    assert "ORDER must increase" in r["message"]
+    assert "too shallow at the stopband edge" in r["message"]
     assert "short by 20.0 dB" in r["message"]
 
 
@@ -174,7 +174,7 @@ def test_first_order_passes_a_shallow_stopband(sweeps):
                           DesignSpec("lowpass", 10_000, stopband_hz=100_000,
                                      stopband_atten_db=18))
     assert r["passed"] is True
-    assert "ORDER must increase" not in r["message"]
+    assert "too shallow at the stopband edge" not in r["message"]
 
 
 def test_highpass_stopband(sweeps):
@@ -187,7 +187,7 @@ def test_highpass_stopband(sweeps):
                             DesignSpec("highpass", 10_000, stopband_hz=1_000,
                                        stopband_atten_db=40))
     assert bad["passed"] is False
-    assert "ORDER must increase" in bad["message"]
+    assert "too shallow at the stopband edge" in bad["message"]
 
 
 def test_stopband_outside_sweep_is_reported(sweeps):
@@ -292,8 +292,8 @@ def test_non_monotonic_failure_blames_resonance_not_order(wide_sweeps):
                           DesignSpec("lowpass", 15_000, stopband_hz=100_000,
                                      stopband_atten_db=60))
     assert "NOT at the band edge" in r["message"]
-    assert "resonating" in r["message"]
-    assert "ORDER must increase" not in r["message"]
+    assert "a resonance or a path around the filter" in r["message"]
+    assert "too shallow at the stopband edge" not in r["message"]
 
 
 def test_edge_limited_failure_still_blames_order(wide_sweeps):
@@ -304,8 +304,8 @@ def test_edge_limited_failure_still_blames_order(wide_sweeps):
                                      stopband_atten_db=60))
     assert r["passed"] is False
     assert r["stopband_worst_hz"] == pytest.approx(150_000, rel=0.02)
-    assert "ORDER must increase" in r["message"]
-    assert "resonating" not in r["message"]
+    assert "too shallow at the stopband edge" in r["message"]
+    assert "a resonance or a path around the filter" not in r["message"]
 
 
 def test_explicit_band_end_narrows_the_requirement(wide_sweeps):
@@ -376,15 +376,6 @@ def test_worst_attenuation_is_direction_agnostic(wide_sweeps):
             == metrics.worst_attenuation(df, pb, 1e7, 1e5))
 
 
-def test_cli_parses_stopband_args():
-    from spice_agent.agent import parse_args
-
-    a = parse_args(["--type", "lowpass", "--target", "10000",
-                    "--stopband-hz", "100000", "--stopband-atten", "40"])
-    assert a.stopband_hz == 100_000 and a.stopband_atten == 40
-    assert a.stopband_end is None
-
-
 def test_cli_stopband_end_reaches_the_spec(monkeypatch):
     """--stopband-end must land in the DesignSpec the loop is run with."""
     import spice_agent.agent.cli as cli
@@ -396,8 +387,9 @@ def test_cli_stopband_end_reaches_the_spec(monkeypatch):
     cli.main(["--no-log", "--type", "lowpass", "--target", "10000",
               "--stopband-hz", "100000", "--stopband-atten", "40",
               "--stopband-end", "1e6"])
-    assert seen["spec"].stopband_end_hz == 1e6
-    assert "everywhere from 100000 Hz to 1e+06 Hz" in seen["spec"].describe()
+    s = seen["spec"]
+    assert (s.stopband_hz, s.stopband_atten_db, s.stopband_end_hz) == (1e5, 40, 1e6)
+    assert "everywhere from 100000 Hz to 1e+06 Hz" in s.describe()
 
 
 def test_plot_marks_the_stopband(tmp_path):
@@ -441,10 +433,10 @@ def test_both_stopband_causes_are_reported():
     assert r["passed"] is False
     assert r["stopband_causes"] == ["order", "resonance"]
     assert "TWO separate stopband problems" in r["message"]
-    assert "ORDER must increase" in r["message"]
+    assert "too shallow at the stopband edge" in r["message"]
     assert "NOT at the band edge" in r["message"]
-    assert "raising the order fixes (1) but not this" in r["message"]
-    assert "increasing the order will not help on its own" not in r["message"]
+    assert "a separate problem from (1), located deeper in the band" in r["message"]
+    assert "will not help" not in r["message"] and "no choice" not in r["message"]
 
 
 def test_order_advice_names_an_order():

@@ -8,6 +8,7 @@ into ngspice text. No LLM logic and no simulator knowledge belongs here,
 which is what keeps this layer testable on its own.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -20,7 +21,14 @@ GROUND = "0"
 SOURCE_ID = "R_SOURCE"
 LOAD_ID = "R_LOAD"
 SOURCE_NODE = "src_ext"
-EXTERNAL_IDS = frozenset({SOURCE_ID, LOAD_ID})
+# Supply rails, likewise owned by the harness (DesignSpec.supply_pos_v /
+# supply_neg_v). The designed circuit connects to the rail NODES; it may
+# not drive them.
+SUPPLY_POS_ID = "V_SUPPLY_POS"
+SUPPLY_NEG_ID = "V_SUPPLY_NEG"
+VCC = "vcc"
+VEE = "vee"
+EXTERNAL_IDS = frozenset({SOURCE_ID, LOAD_ID, SUPPLY_POS_ID, SUPPLY_NEG_ID})
 
 COMPONENT_PREFIXES = {
     "resistor": "R",
@@ -28,15 +36,27 @@ COMPONENT_PREFIXES = {
     "inductor": "L",
     "voltage_source": "V",
     "current_source": "I",
+    "opamp": "X",
 }
+
+# Parts with more than two terminals: named pins instead of a node pair,
+# and a `part` from the model library instead of a value. The id may use
+# the schematic convention 'U1'; it is emitted as the SPICE instance 'XU1'.
+MULTI_PIN = {"opamp"}
+ID_PREFIXES = {"opamp": ("X", "U")}
 
 
 @dataclass
 class Component:
     id: str                   # e.g. "R1" — must start with the correct prefix
     type: str                 # one of COMPONENT_PREFIXES keys
-    nodes: list[str]          # e.g. ["in", "out"] — node "0" is always ground
-    value: str                # e.g. "1k", "100n", "AC 1"
+    nodes: list[str] = field(default_factory=list)  # ["in", "out"]; "0" is ground
+    value: str = ""           # e.g. "1k", "100n", "AC 1"
+    # Multi-pin parts only: the library part, and {pin name: node}. `nodes`
+    # is then derived from `pins` in the model's pin order, so everything
+    # that walks nodes keeps working.
+    part: str | None = None
+    pins: dict | None = None
 
     def __post_init__(self):
         if self.type not in COMPONENT_PREFIXES:
@@ -44,19 +64,52 @@ class Component:
                 f"Unsupported component type '{self.type}'. "
                 f"Supported: {list(COMPONENT_PREFIXES)}"
             )
-        expected_prefix = COMPONENT_PREFIXES[self.type]
-        if not self.id.upper().startswith(expected_prefix):
+        prefixes = ID_PREFIXES.get(self.type, (COMPONENT_PREFIXES[self.type],))
+        if not self.id.upper().startswith(prefixes):
             raise ValueError(
                 f"Component id '{self.id}' should start with "
-                f"'{expected_prefix}' for type '{self.type}'"
+                f"{' or '.join(repr(p) for p in prefixes)} for type '{self.type}'"
             )
+        if self.type in MULTI_PIN:
+            self._init_pins()
+            return
+        if self.pins or self.part:
+            raise ValueError(f"Component '{self.id}' ({self.type}) takes 'nodes' and "
+                             f"'value', not 'pins'/'part'")
         if len(self.nodes) != 2:
             raise ValueError(
                 f"Component '{self.id}' must have exactly 2 nodes, "
                 f"got {self.nodes}"
             )
 
+    def _init_pins(self) -> None:
+        from spice_agent.models import OPAMP_PINS, get_opamp
+
+        if not self.part:
+            raise ValueError(f"Component '{self.id}' ({self.type}) needs a 'part' "
+                             f"from the model library")
+        get_opamp(self.part)                         # raises on an unknown part
+        pins = self.pins or {}
+        missing = [p for p in OPAMP_PINS if p not in pins]
+        extra = [p for p in pins if p not in OPAMP_PINS]
+        if missing or extra:
+            raise ValueError(
+                f"Component '{self.id}' ({self.type}) needs exactly the pins "
+                f"{list(OPAMP_PINS)}"
+                + (f"; missing {missing}" if missing else "")
+                + (f"; unknown {extra}" if extra else ""))
+        self.nodes = [str(pins[p]) for p in OPAMP_PINS]
+        self.value = self.part
+
+    @property
+    def spice_name(self) -> str:
+        if self.type in MULTI_PIN and not self.id.upper().startswith("X"):
+            return "X" + self.id
+        return self.id
+
     def to_spice_line(self) -> str:
+        if self.type in MULTI_PIN:
+            return f"{self.spice_name} {' '.join(self.nodes)} {self.part}"
         n1, n2 = self.nodes
         return f"{self.id} {n1} {n2} {self.value}"
 
@@ -74,7 +127,11 @@ class AnalysisSpec:
     # unity magnitude (e.g. "AC 1") — Circuit.validate() enforces this.
     output_node: str = "out"
 
-    def to_spice_lines(self, output_path: str) -> list[str]:
+    def to_spice_lines(self, output_path: str, op_path: str | None = None) -> list[str]:
+        """The .control block. With `op_path`, the DC operating point is
+        solved first and written there as an ASCII raw file - needed for
+        active parts, whose AC result means nothing if they are not
+        biased correctly."""
         if self.type != "ac":
             raise NotImplementedError(
                 f"Analysis type '{self.type}' not yet supported by the "
@@ -86,8 +143,10 @@ class AnalysisSpec:
         # behavior for complex data — so the output file has a single
         # shared frequency column, which is much simpler and more robust
         # to parse.
+        op = (["set filetype=ascii", "op", f"write {op_path} all"] if op_path else [])
         return [
             ".control",
+            *op,
             f"ac {self.sweep} {self.points} {self.fstart} {self.fstop}",
             f"wrdata {output_path} vdb({self.output_node}) vp({self.output_node})",
             ".endc",
@@ -125,7 +184,14 @@ class Circuit:
             if reserved:
                 raise ValueError(
                     f"Component id(s) {reserved} are reserved for the source/load "
-                    f"resistors the harness adds; use other ids.")
+                    f"resistors and supply rails the harness adds; use other ids.")
+            for c in self.components:
+                if (c.type in ("voltage_source", "current_source")
+                        and {VCC, VEE} & set(c.nodes)):
+                    raise ValueError(
+                        f"Source '{c.id}' drives a supply rail ({VCC}/{VEE}); the rails "
+                        f"are provided by the harness - connect parts to the nodes "
+                        f"'{VCC}' and '{VEE}' instead of adding a supply.")
             if any(SOURCE_NODE in c.nodes for c in self.components):
                 raise ValueError(
                     f"Node '{SOURCE_NODE}' is reserved for the harness's source "
@@ -194,16 +260,25 @@ class Circuit:
                     return non_ground[0]
         raise ValueError("Circuit has no source with a non-ground terminal.")
 
-    def terminated(self, source_ohm: float = 0.0, load_ohm: float | None = None) -> "Circuit":
+    @property
+    def active_parts(self) -> list[Component]:
+        return [c for c in self.components if c.type in MULTI_PIN]
+
+    def terminated(self, source_ohm: float = 0.0, load_ohm: float | None = None,
+                   supply_pos: float | None = None,
+                   supply_neg: float | None = None) -> "Circuit":
         """
-        This circuit placed between the source and load resistances the spec
-        asks for. Returns self unchanged when there are none, so an
-        unterminated spec simulates exactly the circuit the model wrote.
+        This circuit placed in the world the spec describes: between its
+        source and load resistances, and with its supply rails. Returns self
+        unchanged when there are none, so an unterminated, unpowered spec
+        simulates exactly the circuit the model wrote.
 
         V1's input terminal moves to SOURCE_NODE and R_SOURCE joins it to the
-        original input node; R_LOAD runs from the output node to ground.
+        original input node; R_LOAD runs from the output node to ground;
+        V_SUPPLY_POS / V_SUPPLY_NEG hold the nodes vcc / vee at the rails.
         """
-        if source_ohm <= 0 and load_ohm is None:
+        powered = supply_pos is not None
+        if source_ohm <= 0 and load_ohm is None and not powered:
             return self
         self.validate()
         board_in = self.input_node()
@@ -219,11 +294,17 @@ class Circuit:
         if load_ohm is not None:
             components.append(Component(LOAD_ID, "resistor",
                                         [self.analysis.output_node, GROUND], f"{load_ohm:g}"))
+        if powered:
+            components.append(Component(SUPPLY_POS_ID, "voltage_source", [VCC, GROUND],
+                                        f"DC {supply_pos:g}"))
+            components.append(Component(SUPPLY_NEG_ID, "voltage_source", [VEE, GROUND],
+                                        f"DC {supply_neg:g}"))
         return Circuit(title=self.title, components=components, analysis=self.analysis,
                        terminations_applied=True)
 
     def to_netlist(self, output_path: str, technology=None, *, source_ohm: float = 0.0,
-                   load_ohm: float | None = None, ideal_ids=()) -> str:
+                   load_ohm: float | None = None, supply_pos: float | None = None,
+                   supply_neg: float | None = None, ideal_ids=()) -> str:
         """
         Compile this circuit into a full ngspice netlist string.
 
@@ -244,18 +325,35 @@ class Circuit:
         from spice_agent.circuit.expansion import expand_with_parasitics
         from spice_agent.circuit.parasitics import get_profile
 
+        from spice_agent.models import IDEAL_OPAMP, get_opamp
+
         self.validate()
         profile = get_profile(technology)
-        circuit = self.terminated(source_ohm, load_ohm)
+        if self.active_parts and supply_pos is None:
+            raise ValueError(
+                f"{', '.join(c.id for c in self.active_parts)}: active parts need supply "
+                f"rails, and this spec provides none - design with passive parts only.")
+        # An op-amp's chosen grade plays the role of a passive's value; the
+        # technology decides its physics. Ideal technology simulates every
+        # op-amp as the ideal one (as every inductor is then perfect); the
+        # diagnosis does the same for single parts via ideal_ids.
+        swapped = [Component(c.id, c.type, part=IDEAL_OPAMP.name, pins=dict(c.pins))
+                   if c.type in MULTI_PIN and (profile.is_ideal or c.id in ideal_ids) else c
+                   for c in self.components]
+        base = Circuit(self.title, swapped, self.analysis, self.terminations_applied)
+        circuit = base.terminated(source_ohm, load_ohm, supply_pos, supply_neg)
 
         # The title is free text from the model ("fc ≈ 9.95 kHz"). SPICE
         # netlists are ASCII and the file is written in the platform's
         # default encoding, so non-ASCII would crash the write on Windows.
         lines = [self.title.encode("ascii", "replace").decode("ascii")]
-        if circuit is not self:
+        if source_ohm > 0 or load_ohm is not None:
             lines.append(f"* harness terminations (ideal, not part of the design): "
                          f"source {source_ohm:g} ohm, load "
                          f"{'none' if load_ohm is None else f'{load_ohm:g} ohm'}")
+        if supply_pos is not None:
+            lines.append(f"* harness supply rails (ideal): {VCC} = {supply_pos:g} V, "
+                         f"{VEE} = {supply_neg:g} V")
         if profile.is_ideal:
             lines += [c.to_spice_line() for c in circuit.components]
         else:
@@ -268,6 +366,15 @@ class Circuit:
                 output_node=self.analysis.output_node,
                 ideal_ids=set(ideal_ids) | EXTERNAL_IDS,
             )
-        lines += self.analysis.to_spice_lines(output_path)
+        for part in dict.fromkeys(c.part for c in circuit.components if c.type in MULTI_PIN):
+            lines.append(get_opamp(part).subckt())
+        op_path = op_path_for(output_path) if circuit.active_parts else None
+        lines += self.analysis.to_spice_lines(output_path, op_path)
         lines.append(".end")
         return "\n".join(lines) + "\n"
+
+
+def op_path_for(output_path: str) -> str:
+    """Where the operating point of a run writing `output_path` goes."""
+    stem, _ = os.path.splitext(output_path)
+    return stem + "_op.raw"

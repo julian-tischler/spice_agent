@@ -18,6 +18,7 @@ from _support.circuits import (
     RC_LOWPASS,
     RLC_BANDPASS,
     RLC_NOTCH,
+    RLC_NOTCH_LOSSY,
     TWIN_T_NOTCH,
     _with_values,
 )
@@ -41,8 +42,9 @@ from _support.circuits import (
         (DesignSpec("bandpass", 1000), RLC_BANDPASS, False),
         (DesignSpec("bandpass", 5030, bandwidth_hz=500), RLC_BANDPASS, False),
         (DesignSpec("notch", 2000), RLC_NOTCH, False),
-        # right frequency, too shallow a notch
-        (DesignSpec("notch", 5030, min_notch_depth_db=40), RLC_NOTCH, False),
+        # right frequency, too shallow a notch (the branch loss limits it)
+        (DesignSpec("notch", 5030, min_notch_depth_db=40), RLC_NOTCH_LOSSY, False),
+        (DesignSpec("notch", 5030, min_notch_depth_db=40), RLC_NOTCH, True),
         # wrong topology for the spec
         (DesignSpec("lowpass", 1590), RC_HIGHPASS, False),
         (DesignSpec("highpass", 1590), RC_LOWPASS, False),

@@ -30,6 +30,7 @@ import math
 
 import pandas as pd
 
+from spice_agent.hints import render
 from spice_agent.simulation import metrics
 from spice_agent.simulation.spec import DesignSpec
 
@@ -52,10 +53,7 @@ MAX_SUGGESTED_ORDER = 12
 
 def _scale_hint(measured: float, target: float, what: str) -> str:
     """The exact value correction for a frequency miss (see module doc)."""
-    k = measured / target
-    return (f"to move the {what} onto target, multiply EVERY inductor and capacitor "
-            f"value by {k:.3f} and keep the resistors - that shifts the whole "
-            f"response by 1/{k:.3f} without changing its shape")
+    return render("verdict.scale_factor", what=what, k=f"{measured / target:.3f}")
 
 
 def _butterworth_atten_db(order: int, ratio: float) -> float:
@@ -79,7 +77,7 @@ def _order_advice(spec: DesignSpec, atten_at_edge: float) -> tuple[str, dict]:
     eff = _effective_order(atten_at_edge, ratio)
     if eff is not None:
         info["effective_order"] = round(eff, 2)
-        bits.append(f"at the edge it rolls off like a ~{eff:.1f}-order filter")
+        bits.append(render("stopband.effective_order", order=f"{eff:.1f}"))
     need = next((n for n in range(1, MAX_SUGGESTED_ORDER + 1)
                  if _butterworth_atten_db(n, ratio)
                  >= spec.stopband_atten_db + ORDER_MARGIN_DB), None)
@@ -87,8 +85,8 @@ def _order_advice(spec: DesignSpec, atten_at_edge: float) -> tuple[str, dict]:
         info["suggested_order"] = need
         lower = (f" (order {need - 1} gives only "
                  f"{_butterworth_atten_db(need - 1, ratio):.1f} dB)") if need > 1 else ""
-        bits.append(f"a Butterworth of order {need} gives "
-                    f"{_butterworth_atten_db(need, ratio):.1f} dB there{lower}")
+        bits.append(render("stopband.butterworth_orders", n=need,
+                           atten=f"{_butterworth_atten_db(need, ratio):.1f}", lower=lower))
     return "; ".join(bits), info
 
 
@@ -143,12 +141,8 @@ def _peaking(df: pd.DataFrame, reference_db: float, f_from: float, f_to: float):
 
 
 def _peaking_tip(spec: DesignSpec) -> str:
-    if spec.terminated:
-        return ("check the element values against the fixed source/load resistances - "
-                "ladder tables assume the terminations they were computed for")
-    return ("nothing damps it: the source is ideal (0 ohm) and 'out' is unloaded, so an "
-            "L-C section needs its own damping resistance (series R before it, or "
-            "a resistor across the output) or a lower Q")
+    return render("verdict.peaking_terminated" if spec.terminated
+                  else "verdict.peaking_unterminated")
 
 
 def _check_peaking(spec: DesignSpec, df: pd.DataFrame, reference_db: float,
@@ -160,9 +154,34 @@ def _check_peaking(spec: DesignSpec, df: pd.DataFrame, reference_db: float,
     if spec.max_peaking_db is None or peak <= spec.max_peaking_db:
         return True
     result["peaking_excess_db"] = float(peak - spec.max_peaking_db)
-    msgs.append(f"passband peaks {peak:+.1f} dB above its level at {_fmt_hz(peak_hz)} "
-                f"(limit {spec.max_peaking_db:g} dB) - an undamped resonance; "
-                + _peaking_tip(spec))
+    msgs.append(render("verdict.peaking", peak=f"{peak:+.1f}", where=_fmt_hz(peak_hz),
+                       limit=f"{spec.max_peaking_db:g}", tip=_peaking_tip(spec)))
+    return False
+
+
+def _check_gain(spec: DesignSpec, level_db: float, result: dict, msgs: list) -> bool:
+    """The optional absolute passband-gain target; returns ok."""
+    if spec.passband_gain_db is None:
+        return True
+    err = level_db - spec.passband_gain_db
+    result["passband_gain_error_db"] = float(err)
+    what = "peak gain" if spec.filter_type == "bandpass" else "passband gain"
+    if abs(err) <= spec.gain_tolerance_db:
+        msgs.append(f"{what} {level_db:.2f} dB vs target {spec.passband_gain_db:g} dB")
+        return True
+    # The verdict does not know the topology, so it names the usual levers
+    # without claiming which one applies - in an MFB band-pass the gain
+    # resistor R3 also sets the bandwidth, and on a real board the cause
+    # may be parasitics altogether (the diagnosis then says so).
+    # Only levers the spec allows: with passive parts only, naming op-amp
+    # gain resistors is advice the model cannot act on.
+    head = (f"{what} {level_db:.2f} dB vs target {spec.passband_gain_db:g} dB "
+            f"({err:+.2f} dB, outside +/-{spec.gain_tolerance_db:g} dB)")
+    text = head + " - " + render("verdict.gain_active_levers" if spec.active_allowed
+                                 else "verdict.gain_passive_levers")
+    if spec.technology != "ideal":
+        text += "; " + render("verdict.gain_real_board")
+    msgs.append(text)
     return False
 
 
@@ -270,20 +289,14 @@ def check_filter_spec(df: pd.DataFrame, spec: DesignSpec) -> dict:
             far_end_gain_db=float(far_end_db),
         )
         if wrong_way:
-            result["message"] = (
-                f"Response rises with frequency - this looks like a "
-                f"{'highpass' if spec.filter_type == 'lowpass' else 'lowpass'}, "
-                f"not a {spec.filter_type}. Check the topology (which "
-                f"element is in series vs shunt to ground)."
-            )
+            result["message"] = render(
+                "verdict.wrong_way", ftype=spec.filter_type,
+                other="highpass" if spec.filter_type == "lowpass" else "lowpass")
             return result
         if cutoff is None or passband_db - far_end_db < MIN_STOPBAND_ATTENUATION_DB:
-            result["message"] = (
-                f"No usable -3dB crossing in the judged range ({window_txt}): gain "
-                f"is {passband_db:.1f} dB in the passband and {far_end_db:.1f} dB at "
-                f"the far edge of that range. The cutoff may be outside it, or the "
-                f"circuit isn't attenuating enough to be a {spec.filter_type}."
-            )
+            result["message"] = render(
+                "verdict.no_crossing", window=window_txt, pb=f"{passband_db:.1f}",
+                far=f"{far_end_db:.1f}", ftype=spec.filter_type)
             return result
 
         err = _pct_error(cutoff, spec.target_hz)
@@ -301,6 +314,7 @@ def check_filter_spec(df: pd.DataFrame, spec: DesignSpec) -> dict:
         # above it for a highpass.
         pass_edge = lo if spec.filter_type == "lowpass" else hi
         ok = _check_peaking(spec, df, passband_db, pass_edge, cutoff, result, msgs) and ok
+        ok = _check_gain(spec, passband_db, result, msgs) and ok
 
         if spec.stopband_hz is not None:
             band_end = spec.stopband_end(sweep_lo, sweep_hi)
@@ -350,16 +364,15 @@ def check_filter_spec(df: pd.DataFrame, spec: DesignSpec) -> dict:
                                                   else f", outside +/-{tol:g}%") + ")")
         elif bw is not None:
             msgs.append(f"bandwidth {bw:.1f} Hz")
+        ok = _check_gain(spec, g_peak, result, msgs) and ok
         rej_lo, rej_hi = g_peak - g_lo, g_peak - g_hi
         result.update(rejection_at_judge_lo_db=float(rej_lo),
                       rejection_at_judge_hi_db=float(rej_hi))
         if min(rej_lo, rej_hi) < MIN_STOPBAND_ATTENUATION_DB:
             ok = False
-            msgs.append(
-                f"Response is not band-pass shaped within the judged range: the edges "
-                f"are only {rej_lo:.1f} dB ({_fmt_hz(lo)}) and {rej_hi:.1f} dB "
-                f"({_fmt_hz(hi)}) below the peak; both sides need to roll off by at "
-                f"least {MIN_STOPBAND_ATTENUATION_DB:g} dB")
+            msgs.append(render("verdict.bandpass_shape", lo_rej=f"{rej_lo:.1f}",
+                               lo=_fmt_hz(lo), hi_rej=f"{rej_hi:.1f}", hi=_fmt_hz(hi),
+                               need=f"{MIN_STOPBAND_ATTENUATION_DB:g}"))
         return _finish(result, spec, "Simulated bandpass", msgs, ok, full, lo, hi, g_peak)
 
     # ---- notch: minimum location + depth -----------------------------
@@ -388,11 +401,10 @@ def check_filter_spec(df: pd.DataFrame, spec: DesignSpec) -> dict:
                     f"least {spec.min_notch_depth_db:g} dB")
     if abs(g_lo - g_hi) > 3.0:
         ok = False
-        msgs.append(f"gain differs between the low edge ({g_lo:.1f} dB at {_fmt_hz(lo)}) "
-                    f"and the high edge ({g_hi:.1f} dB at {_fmt_hz(hi)}) of the judged "
-                    f"range - a notch should pass both sides equally; this looks more "
-                    f"like a lowpass/highpass")
+        msgs.append(render("verdict.notch_symmetry", g_lo=f"{g_lo:.1f}", lo=_fmt_hz(lo),
+                           g_hi=f"{g_hi:.1f}", hi=_fmt_hz(hi)))
     ok = _check_peaking(spec, df, passband_db, lo, hi, result, msgs) and ok
+    ok = _check_gain(spec, passband_db, result, msgs) and ok
     return _finish(result, spec, "Simulated notch", msgs, ok, full, lo, hi, passband_db)
 
 
@@ -439,32 +451,30 @@ def _check_stopband(df: pd.DataFrame, spec: DesignSpec, passband_db: float,
     causes = [c for c, on in (("order", edge_short), ("resonance", interior_short)) if on]
     result["stopband_causes"] = causes
     if len(causes) == 2:
-        msgs.append("TWO separate stopband problems - both must be "
-                    "fixed, fixing one alone will not pass")
+        msgs.append(render("stopband.two_problems"))
     if edge_short:
         advice, info = _order_advice(spec, atten_at_edge)
         result.update(info)
         decades = abs(math.log10(spec.stopband_hz / spec.target_hz))
+        # Facts only (ARCHITECTURE.md): the measured shortfall, how steep the
+        # design measures, and what a Butterworth of each order gives there
+        # (exact). Not "no choice of values fixes this" - a Chebyshev or
+        # elliptic response of the same order can beat Butterworth here.
         msgs.append(
-            f"(1) short by {_fmt_db(req - atten_at_edge)} dB at the stopband edge "
-            f"({atten_at_edge:.1f} dB at {spec.stopband_hz:g} Hz) - no choice "
-            f"of component values fixes this, the filter ORDER must "
-            f"increase (each order adds ~20 dB/decade, and there "
-            f"{'is' if abs(decades - 1) < 0.05 else 'are'} "
-            f"{decades:.2f} decade(s) between cutoff and stopband"
-            + (f"; {advice}" if advice else "") + ")"
+            render("stopband.edge_shortfall", short=_fmt_db(req - atten_at_edge),
+                   atten=f"{atten_at_edge:.1f}", edge=f"{spec.stopband_hz:g}",
+                   decades=f"{decades:.2f} decade{'' if abs(decades - 1) < 0.05 else 's'}")
+            + (f"; {advice}" if advice else "")
+            + "; " + render("stopband.rolloff_per_order")
         )
     if interior_short:
-        tail = ("raising the order fixes (1) but not this" if edge_short
-                else "increasing the order will not help on its own")
-        msgs.append(
-            f"({2 if edge_short else 1}) short by {req - worst_atten:.1f} dB, "
-            f"and NOT at the band edge: attenuation is {atten_at_edge:.1f} dB "
-            f"at {spec.stopband_hz:g} Hz but degrades to {worst_atten:.1f} dB "
-            f"at {worst_hz:.0f} Hz, so the response recovers inside the "
-            f"stopband instead of staying down - something is resonating "
-            f"or signal is leaking around the filter; {tail}"
-        )
+        tail = render("stopband.recovers_separate" if edge_short
+                      else "stopband.recovers_edge_ok")
+        msgs.append(render("stopband.recovers", n=2 if edge_short else 1,
+                           short=f"{req - worst_atten:.1f}",
+                           edge_atten=f"{atten_at_edge:.1f}", edge=f"{spec.stopband_hz:g}",
+                           worst=f"{worst_atten:.1f}", worst_hz=f"{worst_hz:.0f}",
+                           tail=tail))
     msgs.append("attenuation across the band: " + ", ".join(
         f"{_fmt_hz(q['hz'])} {q['atten_db']:.1f} dB" for q in profile))
     return False

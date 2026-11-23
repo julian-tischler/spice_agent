@@ -281,6 +281,16 @@ def test_export_writes_files(tmp_path):
     assert ".ac dec 100 1 1meg" in (tmp_path / "x.cir").read_text()
 
 
+def test_passive_design_on_a_powered_spec_exports(tmp_path):
+    """The rails are left out when nothing connects to vcc/vee; a live
+    notch run with --supply 12 lost its .asc/.cir/bode to 'exactly one
+    source' (2026-11-23)."""
+    info = export(dict(RC_LOWPASS, analysis=AC), asc_path=tmp_path / "x.asc",
+                  cir_path=tmp_path / "x.cir", supply_pos=12.0, supply_neg=-12.0)
+    assert info["layout"] == "ladder"
+    assert "V_SUPPLY" not in (tmp_path / "x.cir").read_text()
+
+
 def test_export_rejects_invalid_circuit(tmp_path):
     bad = {"title": "no ground", "components": [
         {"id": "V1", "type": "voltage_source", "nodes": ["in", "ref"], "value": "AC 1"},

@@ -8,6 +8,8 @@ it fills this in, and the harness compiles it.
 
 from google.genai import types
 
+from spice_agent.models import OPAMP_PINS, SELECTABLE_OPAMPS
+
 
 CIRCUIT_JSON_SCHEMA = {
         "type": "object",
@@ -18,20 +20,24 @@ CIRCUIT_JSON_SCHEMA = {
                 "description": (
                     "List of circuit components. Must include exactly one "
                     "voltage_source with value 'AC 1' (unity magnitude) "
-                    "between nodes 'in' and '0', and passives "
-                    "(resistor/capacitor/inductor) forming the filter "
-                    "between node 'in' and node 'out', with node '0' as ground."
+                    "between nodes 'in' and '0', and the parts forming the "
+                    "filter between node 'in' and node 'out', with node '0' "
+                    "as ground. Two-terminal parts (resistor, capacitor, "
+                    "inductor) use 'nodes' and 'value'. An opamp uses 'part' "
+                    "and 'pins' instead, and only when supply rails are "
+                    "provided (nodes 'vcc' and 'vee')."
                 ),
                 "items": {
                     "type": "object",
                     "properties": {
                         "id": {
                             "type": "string",
-                            "description": "e.g. 'R1', 'C1', 'L1', 'V1' — must start with the correct prefix letter for its type.",
+                            "description": "e.g. 'R1', 'C1', 'L1', 'V1', 'U1' — must start with the correct prefix letter for its type (opamp: 'U' or 'X').",
                         },
                         "type": {
                             "type": "string",
-                            "enum": ["resistor", "capacitor", "inductor", "voltage_source", "current_source"],
+                            "enum": ["resistor", "capacitor", "inductor", "voltage_source",
+                                     "current_source", "opamp"],
                         },
                         "nodes": {
                             "type": "array",
@@ -40,10 +46,22 @@ CIRCUIT_JSON_SCHEMA = {
                         },
                         "value": {
                             "type": "string",
-                            "description": "e.g. '1k', '100n', '10m', '10u', or 'AC 1' for the source.",
+                            "description": "e.g. '1k', '100n', '10m', '10u', or 'AC 1' for the source. Not used for an opamp.",
+                        },
+                        "part": {
+                            "type": "string",
+                            "enum": sorted(SELECTABLE_OPAMPS),
+                            "description": "opamp only: the op-amp grade.",
+                        },
+                        "pins": {
+                            "type": "object",
+                            "description": "opamp only: the node each pin connects to. "
+                                           "'vcc'/'vee' normally go to the rail nodes 'vcc'/'vee'.",
+                            "properties": {pin: {"type": "string"} for pin in OPAMP_PINS},
+                            "required": list(OPAMP_PINS),
                         },
                     },
-                    "required": ["id", "type", "nodes", "value"],
+                    "required": ["id", "type"],
                 },
             },
         },
