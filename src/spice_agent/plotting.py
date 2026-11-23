@@ -69,20 +69,17 @@ def _annotate(ax, df, spec: DesignSpec):
 
 
 def plot_bode(circuit_json: dict, save_path: str = "bode_plot.png",
-              spec: DesignSpec | None = None, *, target_cutoff_hz: float | None = None,
-              df=None, quiet: bool = False):
+              spec: DesignSpec | None = None, *, df=None, quiet: bool = False):
     """
     Simulate `circuit_json` and save a two-panel Bode plot.
 
-    spec              annotate for this filter type and mark its target
-    target_cutoff_hz  legacy shorthand for DesignSpec("lowpass", value)
-    df                reuse an existing sweep instead of simulating again
+    spec   annotate for this filter type and mark its target (none: a
+           low-pass annotation without a target line)
+    df     reuse an existing sweep instead of simulating again
     """
+    show_target = spec is not None
     if spec is None:
-        spec = DesignSpec("lowpass", target_cutoff_hz) if target_cutoff_hz else DesignSpec()
-        show_target = target_cutoff_hz is not None
-    else:
-        show_target = True
+        spec = DesignSpec()
 
     notch_window = spec.judge_window() if spec.filter_type == "notch" else None
     # Simulate the circuit as built (with the spec's technology parasitics),

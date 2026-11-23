@@ -478,16 +478,3 @@ def _check_stopband(df: pd.DataFrame, spec: DesignSpec, passband_db: float,
     msgs.append("attenuation across the band: " + ", ".join(
         f"{_fmt_hz(q['hz'])} {q['atten_db']:.1f} dB" for q in profile))
     return False
-
-
-def check_lowpass_spec(
-    df: pd.DataFrame,
-    target_cutoff_hz: float,
-    tolerance_pct: float = 10.0,
-) -> dict:
-    """Backward-compatible wrapper: low-pass only."""
-    result = check_filter_spec(
-        df, DesignSpec("lowpass", target_cutoff_hz, tolerance_pct)
-    )
-    result["target_cutoff_hz"] = result["target_hz"]
-    return result

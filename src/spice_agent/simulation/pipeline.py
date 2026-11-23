@@ -146,20 +146,14 @@ def _diagnosis_level(diagnose) -> str:
 
 def simulate_and_verify(
     circuit_json: dict,
-    spec: DesignSpec | None = None,
+    spec: DesignSpec,
     *,
-    target_cutoff_hz: float | None = None,
-    tolerance_pct: float = 10.0,
     capture: dict | None = None,
     diagnose: bool | str = "full",
 ) -> dict:
     """
     The full pipeline in one call: this is the function the agent loop
     will invoke on each iteration.
-
-    Pass a DesignSpec for any filter type. The keyword form
-    simulate_and_verify(circuit, target_cutoff_hz=..., tolerance_pct=...)
-    is kept for existing low-pass callers.
 
     The circuit is simulated between the spec's source and load resistances
     when it sets them (none by default, so nothing is ever added that the
@@ -174,10 +168,6 @@ def simulate_and_verify(
     costs extra local simulations, never model tokens, and never changes
     the verdict.
     """
-    if spec is None:
-        if target_cutoff_hz is None:
-            raise TypeError("simulate_and_verify() needs a DesignSpec or target_cutoff_hz=")
-        spec = DesignSpec("lowpass", target_cutoff_hz, tolerance_pct)
     level = _diagnosis_level(diagnose)
     terms = {"source_ohm": spec.source_ohm, "load_ohm": spec.load_ohm,
              "supply_pos": spec.supply_pos_v, "supply_neg": spec.supply_neg_v}

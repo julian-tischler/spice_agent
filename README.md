@@ -579,12 +579,12 @@ open is what was simulated — parasitics and all. On the breadboard profile a
 ## Testing
 
 ```bash
-python -m pytest -m "not live"   # 733 tests, needs only ngspice  (~100 s)
+python -m pytest -m "not live"   # 732 tests, needs only ngspice  (~100 s)
 python -m pytest -m ltspice      #  15 tests, drives LTspice.exe
 python -m pytest -m live         #   5 tests, calls Gemini; needs an API key
 ```
 
-738 total (the 15 LTspice tests are part of the "not live" set). The Claude
+737 total (the 15 LTspice tests are part of the "not live" set). The Claude
 backend is tested against a scripted runner, so no test calls `claude`. The LTspice and live tests skip themselves when the binary or the
 key is missing, so `python -m pytest` works on a bare checkout.
 

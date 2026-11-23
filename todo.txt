@@ -21,7 +21,7 @@ STATE
   * ARCHITECTURE.md rule: "feedback and hints convey hard facts only"
   * hint catalogue: src/spice_agent/hints.py (91 hints, documented),
     generated HINTS.md (python -m spice_agent.hints), tests/test_hints.py
-- Tests: 733 offline pass (python -m pytest -m "not live"); 15 LTspice pass
+- Tests: 732 offline pass (python -m pytest -m "not live"); 15 LTspice pass
   (LTspice was updated by the user and works again).
 - Live runs: Claude backend via winget CLI:
   CLAUDE_BIN="$LOCALAPPDATA/Microsoft/WinGet/Links/claude.exe"

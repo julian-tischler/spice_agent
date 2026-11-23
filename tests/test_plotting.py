@@ -100,13 +100,6 @@ def test_notch_is_not_annotated_as_a_lowpass(sweeps, tmp_path, monkeypatch):
     assert all(abs(x - lowpass_artifact) > 100 for x in vlines)
 
 
-def test_legacy_target_cutoff_kwarg_still_works(sweeps, tmp_path):
-    out = tmp_path / "legacy.png"
-    plot_bode(dict(RC_LOWPASS, analysis=AC), save_path=out,
-              target_cutoff_hz=1590.0, df=sweeps["lowpass"], quiet=True)
-    assert out.exists()
-
-
 def test_no_spec_defaults_to_lowpass(sweeps, tmp_path):
     out = tmp_path / "nospec.png"
     plot_bode(dict(RC_LOWPASS, analysis=AC), save_path=out, df=sweeps["lowpass"], quiet=True)
