@@ -27,7 +27,7 @@ from spice_agent.agent.rate_limit import RetryPolicy
 from spice_agent.circuit import PROFILES
 from spice_agent.runlog import RunRecorder
 from spice_agent.simulation import DesignSpec
-from spice_agent.simulation.spec import DEFAULT_MAX_PEAKING_DB
+from spice_agent.simulation.spec import DEFAULT_MAX_PEAKING_DB, parse_value_series
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -53,6 +53,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--stopband-end", type=float, default=None, metavar="HZ",
                    help="lowpass/highpass: far edge of the stopband. Default: the edge "
                         "of the judged range (see --judge-lo/--judge-hi)")
+    p.add_argument("--series", type=_series_arg, default=None, metavar="SERIES",
+                   help="standard values the passive parts must use (E6/E12/E24/E48/E96): "
+                        "'E24' for all, 'R=E96,C=E12' per type, 'E12,R=E96' both. "
+                        "Default: any value")
     jd = p.add_argument_group(
         "what is judged (defaults: 2 decades either side of --target, 3 dB peaking, "
         "ideal source, no load)")
@@ -126,6 +130,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _series_arg(text: str) -> dict[str, str]:
+    try:
+        spec = parse_value_series(text)
+        DesignSpec(value_series=spec)           # validates the series names
+        return spec
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def _amps(text: str) -> float:
     """'1m', '500u' or '0.001' -> amps."""
     from spice_agent.units import parse_spice_value
@@ -178,6 +191,7 @@ def main(argv=None) -> int:
         gain_tolerance_db=a.gain_tol,
         max_supply_current_a=a.max_supply_current,
         allow_active=not a.passive_only,
+        value_series=a.series,
     )
     argv_used = list(argv) if argv is not None else None
     if a.backend == "claude":

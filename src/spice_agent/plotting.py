@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 
 from spice_agent.simulation import metrics
 from spice_agent.simulation import DesignSpec, simulate_get_full_sweep
+from spice_agent.simulation.pipeline import refinement_for
 
 MEASURED = "tab:red"
 TARGET = "tab:green"
@@ -81,7 +82,7 @@ def plot_bode(circuit_json: dict, save_path: str = "bode_plot.png",
     if spec is None:
         spec = DesignSpec()
 
-    notch_window = spec.judge_window() if spec.filter_type == "notch" else None
+    refine = refinement_for(spec)
     # Simulate the circuit as built (with the spec's technology parasitics),
     # and for a non-ideal technology also the ideal one, to overlay.
     if df is None:
@@ -89,14 +90,14 @@ def plot_bode(circuit_json: dict, save_path: str = "bode_plot.png",
                                     source_ohm=spec.source_ohm, load_ohm=spec.load_ohm,
                                     supply_pos=spec.supply_pos_v,
                                     supply_neg=spec.supply_neg_v,
-                                    notch_window=notch_window)
+                                    refine=refine)
     df_ideal = None
     if spec.technology != "ideal":
         df_ideal = simulate_get_full_sweep(circuit_json, technology="ideal",
                                           source_ohm=spec.source_ohm, load_ohm=spec.load_ohm,
                                           supply_pos=spec.supply_pos_v,
                                           supply_neg=spec.supply_neg_v,
-                                          notch_window=notch_window)
+                                          refine=refine)
 
     fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 

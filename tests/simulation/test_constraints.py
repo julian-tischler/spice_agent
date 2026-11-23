@@ -1,6 +1,6 @@
 """
-Requirements that decide passive vs active: what parts exist (inductance
-limits per technology), a supply-current budget, rail- and budget-aware
+Requirements that decide passive vs active: what parts exist (R, C and L
+value ranges per technology), a supply-current budget, rail- and budget-aware
 grade advice, a neutral prompt, and --passive-only.
 
 Measured first (ngspice-47, 2026-11-23):
@@ -58,10 +58,14 @@ def mfb_50k(part):
 # What exists
 # ---------------------------------------------------------------------
 
-def test_inductance_limits_per_technology():
-    assert SMD_PCB.max_practical_inductance == 10e-3
-    assert BREADBOARD.max_practical_inductance == 100e-3
-    assert IDEAL.max_practical_inductance == float("inf")
+def test_value_ranges_per_technology():
+    assert SMD_PCB.inductor_range == (1e-9, 10e-3)
+    assert BREADBOARD.inductor_range == (1e-6, 100e-3)
+    assert SMD_PCB.capacitor_range == (1e-12, 100e-9)
+    assert BREADBOARD.capacitor_range == (1e-12, 10e-6)
+    assert SMD_PCB.resistor_range == BREADBOARD.resistor_range == (1.0, 10e6)
+    assert not IDEAL.has_value_limits
+    assert IDEAL.value_range("capacitor") == (0.0, float("inf"))
 
 
 def test_unbuildable_design_fails_but_is_still_simulated():
@@ -89,6 +93,61 @@ def test_ideal_technology_has_no_size_limit():
            c("R1", "resistor", ["out", "0"], "30k")]
     r = run(rlc, DesignSpec("bandpass", 5e4, bandwidth_hz=5e3))
     assert r["availability"]["ok"] is True and "NOT BUILDABLE" not in r["message"]
+
+
+# RC low-pass at 1 kHz with a 470 nF C0G part on smd_pcb (largest: 100 nF):
+# 339 ohm / 470n is 998 Hz and passes the response, so the only failure is
+# availability.
+RC_470N = [c("R1", "resistor", ["in", "out"], "339"), c("C1", "capacitor", ["out", "0"], "470n")]
+
+
+def test_oversized_capacitor_is_not_buildable_on_smd():
+    r = run(RC_470N, DesignSpec("lowpass", 1000, technology="smd_pcb"))
+    assert r["passed"] is False
+    assert r["cutoff_hz"] == pytest.approx(998, rel=0.02)          # still measured
+    assert r["message"].startswith("NOT BUILDABLE - C1 = 470 nF exceeds the 100 nF "
+                                   "available on smd_pcb - use a smaller capacitor")
+    assert "Impedance scaling (every R and L times k" in r["message"]
+    (v,) = r["availability"]["violations"]
+    assert (v["type"], v["side"], v["limit_si"]) == ("capacitor", "above", 100e-9)
+
+
+def test_the_same_capacitor_exists_on_a_breadboard():
+    r = run(RC_470N, DesignSpec("lowpass", 1000, technology="breadboard"))
+    assert r["availability"]["ok"] is True
+
+
+def test_too_small_parts_name_the_lower_limit():
+    lc = [c("R1", "resistor", ["in", "n1"], "0.5"), c("L1", "inductor", ["n1", "out"], "470n"),
+          c("C1", "capacitor", ["out", "0"], "5.4u")]
+    a = run(lc, DesignSpec("lowpass", 1e5, technology="breadboard"))["availability"]
+    assert [(v["id"], v["side"]) for v in a["violations"]] == [("R1", "below"), ("L1", "below")]
+    assert "R1 = 500 mohm is below the 1 ohm available on breadboard" in a["message"]
+    assert "L1 = 470 nH is below the 1 uH available on breadboard" in a["message"]
+    assert "use a larger resistor" in a["message"] and "use a larger inductor" in a["message"]
+
+
+def test_each_lever_is_stated_once():
+    caps = [c(f"C{i}", "capacitor", ["out", "0"], "220n") for i in (1, 2)]
+    a = run([c("R1", "resistor", ["in", "out"], "1k")] + caps,
+            DesignSpec("lowpass", 1000, technology="smd_pcb"))["availability"]
+    assert len(a["violations"]) == 2
+    assert a["message"].count("use a smaller capacitor") == 1
+
+
+def test_limits_are_reported_only_where_they_exist():
+    assert run(RC_470N, DesignSpec("lowpass", 1000))["availability"]["limits"] is None
+    limits = run(RC_470N, DesignSpec("lowpass", 1000, technology="smd_pcb"))["availability"]["limits"]
+    assert limits["capacitor"] == [1e-12, 100e-9]
+
+
+def test_prompt_states_the_ranges_on_real_technology():
+    from spice_agent.agent.prompts import build_system_prompt
+
+    p = build_system_prompt(DesignSpec("lowpass", 1000, technology="smd_pcb"))
+    assert ("Parts available as smd_pcb: resistors 1 ohm to 10 Mohm, capacitors 1 pF to "
+            "100 nF (C0G/NP0 ceramic), inductors 1 nH to 10 mH") in p
+    assert "Parts available as" not in build_system_prompt(DesignSpec("lowpass", 1000))
 
 
 # ---------------------------------------------------------------------

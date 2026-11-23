@@ -116,9 +116,20 @@ class TechnologyProfile:
 
     # -- availability -------------------------------------------------
     # Technology constrains which parts exist: a 24 mH inductor is a
-    # leaded choke, not something you find in an 0603 package. Advisory
-    # only -- nothing refuses to simulate an unavailable value.
-    max_practical_inductance: float = float("inf")
+    # leaded choke, not something you find in an 0603 package. (min, max)
+    # per part type, inclusive, in ohm / F / H; enforced by
+    # simulation/availability.py (a design outside them is still simulated,
+    # then fails as NOT BUILDABLE). Like the parasitics these are
+    # representative catalogue figures, not one distributor's range.
+    #
+    # Capacitors are limited to STABLE dielectrics (C0G/NP0 ceramic, film):
+    # X7R and electrolytics come far larger, but their capacitance moves
+    # with voltage, temperature and age, which nothing here simulates - a
+    # filter built on them would pass here and drift when built.
+    resistor_range: tuple[float, float] = (0.0, float("inf"))
+    capacitor_range: tuple[float, float] = (0.0, float("inf"))
+    inductor_range: tuple[float, float] = (0.0, float("inf"))
+    capacitor_dielectric: str = ""
 
     # ---- derived quantities, the useful public API ------------------
 
@@ -165,6 +176,17 @@ class TechnologyProfile:
     @property
     def is_ideal(self) -> bool:
         return self.name == "ideal"
+
+    def value_range(self, component_type: str) -> tuple[float, float]:
+        """(min, max) available value of a passive part type; (0, inf) for
+        anything without a limit."""
+        return {"resistor": self.resistor_range, "capacitor": self.capacitor_range,
+                "inductor": self.inductor_range}.get(component_type, (0.0, float("inf")))
+
+    @property
+    def has_value_limits(self) -> bool:
+        return any(r != (0.0, float("inf")) for r in
+                   (self.resistor_range, self.capacitor_range, self.inductor_range))
 
     def describe(self) -> str:
         """One-paragraph summary for the design prompt."""
@@ -224,7 +246,10 @@ SMD_PCB = TechnologyProfile(
     interconnect_node_c=0.3e-12,        # to the ground plane
     contact_resistance=0.0,             # soldered
     io_coupling_c=0.02e-12,             # a ground plane between them helps a lot
-    max_practical_inductance=10e-3,     # about the largest SMD power inductor
+    resistor_range=(1.0, 10e6),         # thick-film 0603/0805
+    capacitor_range=(1e-12, 100e-9),    # C0G MLCC: 100 nF is about the largest (1206)
+    capacitor_dielectric="C0G/NP0 ceramic",
+    inductor_range=(1e-9, 10e-3),       # chip inductors up to the largest SMD power inductor
 )
 
 BREADBOARD = TechnologyProfile(
@@ -245,7 +270,10 @@ BREADBOARD = TechnologyProfile(
     interconnect_node_c=2e-12,          # strip to everything around it
     contact_resistance=0.03,            # per spring contact, and variable
     io_coupling_c=2e-12,                # adjacent strips, no plane between
-    max_practical_inductance=100e-3,    # about the largest leaded choke on sale
+    resistor_range=(1.0, 10e6),         # leaded metal/carbon film
+    capacitor_range=(1e-12, 10e-6),     # ceramic disc (pF) up to film (10 uF)
+    capacitor_dielectric="C0G ceramic or film",
+    inductor_range=(1e-6, 100e-3),      # leaded RF chokes up to the largest leaded choke
 )
 
 PROFILES: dict[str, TechnologyProfile] = {

@@ -21,6 +21,8 @@ textbook designs), measured first (2026-11-19):
         unterminated: +52.7 dB peak
 """
 
+import math
+
 import pytest
 
 from spice_agent.agent.analysis import analysis_for
@@ -294,18 +296,18 @@ NOTCH_LIVE_R100 = [c("R1", "resistor", ["in", "out"], "100"),
                    c("C1", "capacitor", ["n1", "0"], "10n")]
 
 
-def test_refine_notch_finds_the_minimum_between_grid_points():
+def test_refinement_finds_the_minimum_between_grid_points():
     import numpy as np
     import pandas as pd
 
-    from spice_agent.simulation.pipeline import refine_notch
+    from spice_agent.simulation.pipeline import refine_extremum
 
     def response(f):           # |f - 1234.5| on a dB scale: a zero at 1234.5 Hz
         return pd.DataFrame({"freq": f, "gain_db": 20 * np.log10(np.abs(f - 1234.5) + 1e-9)})
 
     coarse = response(np.logspace(2, 4, 201))
     calls = []
-    fine = refine_notch(coarse, lambda a, b, n: calls.append((a, b)) or response(
+    fine = refine_extremum(coarse, lambda a, b, n: calls.append((a, b)) or response(
         np.linspace(a, b, n)), 100, 1e4)
     assert len(calls) == 1 and calls[0][0] < 1234.5 < calls[0][1]
     f_min = fine["freq"].iloc[int(np.argmin(fine["gain_db"].to_numpy()))]
@@ -334,3 +336,98 @@ def test_lossy_notch_is_blamed_on_the_losses_not_the_design():
     assert d["ideal_parts_passed"] is True
     assert d["design_failures"] == [] and d["parasitic_failures"] == ["notch depth"]
     assert "ideal parts fail it too" not in r["message"]
+
+
+# ---------------------------------------------------------------------
+# Band-pass refinement: the centre is not read off the grid
+# ---------------------------------------------------------------------
+#
+# The live E12 evaluation of 2026-11-23: every band-pass run reported its
+# centre as 49692 Hz, a grid point, whatever its values. Series RLC into R
+# has its peak at exactly 1/(2*pi*sqrt(LC)) and a -3 dB bandwidth of R/(2*pi*L).
+
+BP_SPEC = DesignSpec("bandpass", 5e4, bandwidth_hz=5e3, tolerance_pct=2)
+
+
+def series_rlc(l, cap, r):
+    return [c("L1", "inductor", ["in", "n1"], l), c("C1", "capacitor", ["n1", "out"], cap),
+            c("R1", "resistor", ["out", "0"], r)]
+
+
+@pytest.mark.parametrize("l, cap, r", [("1m", "10n", "31.6"), ("1.5m", "6.8n", "47"),
+                                       ("1m", "10.13n", "31.4")])
+def test_bandpass_centre_is_the_true_resonance(l, cap, r):
+    from spice_agent.units import parse_spice_value as p
+
+    f0 = 1 / (2 * math.pi * math.sqrt(p(l) * p(cap)))
+    res = run(series_rlc(l, cap, r), BP_SPEC)
+    assert res["center_hz"] == pytest.approx(f0, rel=1e-4)
+
+
+def test_grid_quantisation_no_longer_decides_the_bandwidth():
+    """1m / 10n / 31.6: true bandwidth 5029 Hz (+0.6 %). Live, against the
+    coarse peak, it read +4.43 % and failed a +/-2 % spec."""
+    res = run(series_rlc("1m", "10n", "31.6"), BP_SPEC)
+    assert res["passed"] is True
+    assert abs(res["bandwidth_error_pct"]) < 1.0
+    assert res["error_pct"] == pytest.approx(0.658, abs=0.01)      # the grid said +1.70 %
+
+
+def test_refinement_finds_a_peak_too():
+    import numpy as np
+    import pandas as pd
+
+    from spice_agent.simulation.pipeline import refine_extremum
+
+    def response(f):           # a peak at 1234.5 Hz
+        return pd.DataFrame({"freq": f, "gain_db": -20 * np.log10(np.abs(f - 1234.5) + 1e-3)})
+
+    fine = refine_extremum(response(np.logspace(2, 4, 201)),
+                           lambda a, b, n: response(np.linspace(a, b, n)), 100, 1e4, "max")
+    f_max = fine["freq"].iloc[int(np.argmax(fine["gain_db"].to_numpy()))]
+    assert f_max == pytest.approx(1234.5, rel=1e-5)
+
+
+def test_only_extremum_specs_are_refined():
+    from spice_agent.simulation.pipeline import refinement_for
+
+    assert refinement_for(DesignSpec("lowpass", 1e4)) is None
+    assert refinement_for(DesignSpec("highpass", 1e4)) is None
+    assert refinement_for(DesignSpec("notch", 5e4))[2] == "min"
+    assert refinement_for(BP_SPEC) == (500.0, 5e6, "max")
+
+
+# The -3 dB edges: measured 3.000 dB below the peak, so a series RLC's
+# bandwidth is R/(2*pi*L) * sqrt(1/10**-0.3 - 1) = 0.99763 * R/(2*pi*L)
+# (R/(2*pi*L) itself is the half-power, 3.0103 dB, bandwidth).
+EDGE_3DB = math.sqrt(1 / 10 ** -0.3 - 1)
+
+
+@pytest.mark.parametrize("l, cap, r", [("1m", "10n", "31.6"), ("1m", "10.3n", "30.1"),
+                                       ("1.5m", "6.8n", "47")])
+def test_bandpass_edges_are_not_interpolated_across_the_grid(l, cap, r):
+    from spice_agent.units import parse_spice_value as p
+
+    res = run(series_rlc(l, cap, r), BP_SPEC)
+    assert res["bandwidth_hz"] == pytest.approx(EDGE_3DB * p(r) / (2 * math.pi * p(l)),
+                                                rel=1e-5)
+
+
+def test_one_sweep_covers_the_peak_and_both_edges():
+    import numpy as np
+    import pandas as pd
+
+    from spice_agent.simulation.pipeline import refine_band
+
+    def response(f):           # |H| of a series RLC, f0 = 1 kHz, Q = 5
+        x = 5 * (f / 1e3 - 1e3 / f)
+        return pd.DataFrame({"freq": f, "gain_db": -10 * np.log10(1 + x * x)})
+
+    calls = []
+    fine = refine_band(response(np.logspace(1, 5, 401)),
+                       lambda a, b, n: calls.append((a, b)) or response(np.linspace(a, b, n)),
+                       10, 1e5)
+    assert len(calls) == 1
+    (a, b), = calls
+    assert a < 1e3 * 0.9 and b > 1e3 * 1.1                         # spans both edges
+    assert len(fine) > 401

@@ -98,7 +98,7 @@ spice_agent.hints`). `tests/test_hints.py` checks four things:
 | `simulation/spec.py` | `DesignSpec` — the requirement model, including the judged window, the peaking limit and the terminations. |
 | `simulation/verify.py` | `check_filter_spec` — the verdict, and the feedback text. |
 | `simulation/diagnosis.py` | Why a non-ideal design failed: design vs construction, per-parasitic-group and per-component attribution, part self-resonances. Levels `full` / `basic` / `off`. |
-| `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call, including the diagnosis. For a notch spec every sweep is refined around its minimum first (`refine_notch`), so the depth is not limited by the grid. |
+| `simulation/pipeline.py` | `simulate_and_verify` — the whole path in one call, including the diagnosis. For a notch or band-pass spec every sweep is refined first (`refine_sweep`): around a notch's minimum, or across a band-pass's peak and both −3 dB edges in one sweep, so depth, centre and bandwidth are not limited by the grid. |
 | `agent/analysis.py` | `analysis_for(spec)` — which AC sweep a spec is simulated with. A leaf module so prompts, loop and CLI need not import each other. |
 | `agent/rate_limit.py` | Pacing and retry for the Gemini API. Knows nothing about circuits. |
 | `agent/prompts.py` | The design brief. Pure string building, so it can be asserted. |
@@ -136,8 +136,11 @@ assumed exactly two nodes had to learn about `MULTI_PIN`. Pin order matters
 op-amps *allowed*. The prompt then offers both options with equal weight
 and a TRADE-OFFS note built from the spec's own numbers (`prompts.
 build_tradeoff_note`). The checks that actually separate the two are
-enforced: `simulation/availability.py` applies the technology's
-`max_practical_inductance` (`NOT BUILDABLE`), and
+enforced: `simulation/availability.py` applies the technology's R, C and L
+value ranges (`TechnologyProfile.resistor_range` / `capacitor_range` /
+`inductor_range`) and, when the spec sets one, its standard value series
+(`DesignSpec.value_series`, tables in `models/series.py`), both as
+`NOT BUILDABLE`; and
 `bias.check_supply_budget` applies `max_supply_current_a` per rail
 (`OVER BUDGET`). Both still let the design be simulated and reported, and
 both are design-level failures for the diagnosis. Catalogue properties of

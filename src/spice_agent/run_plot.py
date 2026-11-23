@@ -31,6 +31,8 @@ import pandas as pd
 from matplotlib.patches import Rectangle
 
 from spice_agent.simulation import DesignSpec, metrics
+from spice_agent.simulation.diagnosis import CHECK_PRIORITY, margins
+from spice_agent.simulation.verify import MIN_STOPBAND_ATTENUATION_DB
 
 # Ordinal blue ramp, light -> dark; first step chosen to clear 2:1 on the
 # light surface (dataviz reference palette, steps 250..700).
@@ -45,6 +47,7 @@ AXIS = "#c3c2b7"
 REQUIREMENT = "#898781"
 NOT_JUDGED = "#e1e0d9"
 GOOD = "#006300"            # success text ink, used with a "PASS" label
+BAD = "#a0281e"             # failure text ink, used with the "failed on" reasons
 
 PREFIX = {"resistor": "R", "capacitor": "C", "inductor": "L", "opamp": "U"}
 
@@ -112,6 +115,56 @@ def component_table(iterations: list[dict]) -> tuple[list[str], list[list[str]]]
     return labels, cells
 
 
+FREQUENCY_LABEL = {"lowpass": "cutoff", "highpass": "cutoff", "bandpass": "centre",
+                   "notch": "notch"}
+
+
+def fail_reasons(result: dict, spec: DesignSpec) -> list[str]:
+    """
+    Why an iteration failed, one short line per failed requirement, each
+    with its measured value and its limit ("cutoff +2.6% (limit +/-2%)").
+    The failed checks are the ones diagnosis.margins() puts below zero, in
+    the diagnosis's priority order; bias, simulation failures and repeats
+    are added as they are not margins. Empty for a pass.
+    """
+    if result.get("passed"):
+        return []
+    if result.get("simulation_failed"):
+        return ["simulation failed"]
+    if result.get("repeated_design"):
+        return [f"repeat of iteration {result.get('repeat_of')}"]
+    tol = spec.tolerance_pct
+    r = result
+    text = {
+        "frequency": lambda: f"{FREQUENCY_LABEL[spec.filter_type]} {r['error_pct']:+.1f}% "
+                             f"(limit \u00b1{tol:g}%)",
+        "bandwidth": lambda: f"bandwidth {r['bandwidth_error_pct']:+.1f}% "
+                             f"(limit \u00b1{tol:g}%)",
+        "stopband": lambda: f"stopband {r['stopband_atten_db']:.1f} dB "
+                            f"(need {spec.stopband_atten_db:g} dB)",
+        "band shape": lambda: f"band edges {min(r['rejection_at_judge_lo_db'], r['rejection_at_judge_hi_db']):.1f} dB "
+                              f"down (need {MIN_STOPBAND_ATTENUATION_DB:g} dB)",
+        "peaking": lambda: f"peaking {r['passband_peaking_db']:+.1f} dB "
+                           f"(max {spec.max_peaking_db:g} dB)",
+        "notch depth": lambda: f"depth {r['notch_depth_db']:.1f} dB "
+                               f"(need {spec.min_notch_depth_db:g} dB)",
+        "notch symmetry": lambda: f"edges differ {abs(r['gain_at_judge_lo_db'] - r['gain_at_judge_hi_db']):.1f} dB "
+                                  f"(max 3 dB)",
+        "passband gain": lambda: f"gain {r['passband_gain_error_db']:+.2f} dB "
+                                 f"(limit \u00b1{spec.gain_tolerance_db:g} dB)",
+        "supply current": lambda: f"supply {-r['supply']['margin_a'] * 1e3:.2f} mA over budget",
+        "availability": lambda: "not buildable: " + ", ".join(
+            f"{v['id']} " + (f"not {v['series']}" if v.get("kind") == "series"
+                             else "too large" if v.get("side") == "above" else "too small")
+            for v in r["availability"]["violations"]),
+    }
+    failed = {check for check, (margin, _) in margins(result, spec).items() if margin < 0}
+    reasons = [text[check]() for check in CHECK_PRIORITY if check in failed]
+    if (result.get("bias") or {}).get("ok") is False:
+        reasons.insert(0, "bias point")
+    return reasons or ["fail"]
+
+
 def metric_rows(spec: DesignSpec, iterations: list[dict]) -> tuple[list[str], list[list[str]]]:
     labels, cells = [], []
 
@@ -149,6 +202,8 @@ def metric_rows(spec: DesignSpec, iterations: list[dict]) -> tuple[list[str], li
     row("verdict", lambda r: "PASS" if r.get("passed") else
         ("sim failed" if r.get("simulation_failed") else
          f"repeat of {r['repeat_of']}" if r.get("repeated_design") else "fail"))
+    if not all(it["result"].get("passed") for it in iterations):
+        row("failed on", lambda r: "\n".join(fail_reasons(r, spec)) or "-")
     return labels, cells
 
 
@@ -199,6 +254,8 @@ def plot_run_history(run_dir, save_path=None, *, quiet: bool = False) -> Path:
     comp_labels, comp_cells = component_table(iterations)
     met_labels, met_cells = metric_rows(spec, iterations)
     n_rows = len(comp_labels) + len(met_labels) + 1
+    if "failed on" in met_labels:
+        n_rows += max(len(c.split("\n")) for c in met_cells[met_labels.index("failed on")]) - 1
     colors = _ramp(len(iterations))
 
     plt.rcParams.update({"font.size": 9, "axes.edgecolor": AXIS,
@@ -295,6 +352,15 @@ def plot_run_history(run_dir, save_path=None, *, quiet: bool = False) -> Path:
             cell.set_text_props(color=INK_2)
         elif row_labels[r - 1] == "verdict" and cell.get_text().get_text() == "PASS":
             cell.set_text_props(color=GOOD, fontweight="bold")
+        elif row_labels[r - 1] == "failed on":
+            cell.set_text_props(color=BAD)
+    if "failed on" in row_labels:
+        # one line per failed requirement: grow the row to the most lines
+        r = row_labels.index("failed on") + 1
+        lines = max(len(row[r - 1].split("\n")) for row in zip(*body)) if body else 1
+        for (rr, c), cell in table.get_celld().items():
+            if rr == r:
+                cell.set_height(cell.get_height() * lines)
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=SURFACE)

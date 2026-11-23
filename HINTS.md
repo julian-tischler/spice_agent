@@ -6,9 +6,9 @@ Every piece of advice or explanation the harness gives the model, with when it a
 
 | Kind | Count |
 |---|---|
-| fact (exact maths or physics for the stated topology) | 27 |
+| fact (exact maths or physics for the stated topology) | 33 |
 | derived (computed from a measurement of this design) | 18 |
-| catalogue (library, technology profile or spec) | 13 |
+| catalogue (library, technology profile or spec) | 17 |
 | explanation (physical meaning of a measurement) | 17 |
 | rule of thumb (guidance, always labelled as such) | 16 |
 
@@ -211,9 +211,9 @@ Every piece of advice or explanation the harness gives the model, with when it a
 > ; inductors are available only up to 10 mH on smd_pcb (enforced)
 
 - **Applies when:** Inside prompt.tradeoff.inductor_size on a real technology.
-- **Valid for:** Always: the technology profile's max_practical_inductance.
+- **Valid for:** Always: the technology profile's inductor_range.
 - **Why:** Larger parts do not exist in that construction; the check is enforced.
-- **Source:** TechnologyProfile.max_practical_inductance.
+- **Source:** TechnologyProfile.inductor_range.
 
 ### `prompt.tradeoff.inductor_any` - catalogue
 
@@ -278,14 +278,32 @@ Every piece of advice or explanation the harness gives the model, with when it a
 - **Why:** SRF = 1/(2*pi*sqrt(L*Cw)) rises as L falls (Cw roughly constant per family).
 - **Source:** Inductor application notes.
 
-### `prompt.technology.inductor_limit` - catalogue
+### `prompt.technology.value_ranges` - catalogue
 
->  Inductors above 10 mH are not available as smd_pcb parts; a design that needs one fails.
+>  Parts available as smd_pcb: resistors 1 ohm to 10 Mohm, capacitors 1 pF to 100 nF (C0G/NP0 ceramic), inductors 1 nH to 10 mH; a design that needs a value outside these fails.
 
-- **Applies when:** Construction note on a technology with an inductance limit.
-- **Valid for:** Always: TechnologyProfile.max_practical_inductance.
-- **Why:** Enforced by simulation/availability.py.
-- **Source:** TechnologyProfile.
+- **Applies when:** Construction note on a technology with value limits (every real one).
+- **Valid for:** Always: TechnologyProfile.resistor_range / capacitor_range / inductor_range.
+- **Why:** Enforced by simulation/availability.py, so the model should know the ranges before it designs, not learn them from a failure.
+- **Source:** TechnologyProfile (representative catalogue figures; capacitors limited to stable dielectrics, whose value does not move with voltage or temperature).
+
+### `prompt.series.required` - catalogue
+
+> STANDARD VALUES (required, checked): resistors from E12: 1, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2 (times any power of ten). A value of any listed part type outside its series fails the design; types not listed may take any value.
+
+- **Applies when:** The spec sets value_series (--series).
+- **Valid for:** Always: enforced by simulation/availability.py on every technology.
+- **Why:** The model must know the allowed values before it designs, not learn them from a failure.
+- **Source:** DesignSpec.value_series and the IEC 60063 tables.
+
+### `prompt.series.line` - catalogue
+
+> resistors from E12: 1, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2 (times any power of ten)
+
+- **Applies when:** Inside prompt.series.required, once per series.
+- **Valid for:** Always: the series' published values.
+- **Why:** States every allowed mantissa; E48 and E96 are not something to recall.
+- **Source:** IEC 60063 (models/series.py).
 
 ### `prompt.realistic_values` - rule of thumb
 
@@ -819,19 +837,91 @@ Every piece of advice or explanation the harness gives the model, with when it a
 
 > L1 = 22 mH exceeds the 10 mH available on smd_pcb
 
-- **Applies when:** An inductor exceeds the technology's max_practical_inductance.
-- **Valid for:** Always: the technology profile's limit.
+- **Applies when:** A resistor, capacitor or inductor is above its type's range on the spec's technology.
+- **Valid for:** Always: the technology profile's range for that part type.
 - **Why:** A response achieved with a part that does not exist is not a design.
-- **Source:** TechnologyProfile.max_practical_inductance.
+- **Source:** TechnologyProfile.resistor_range / capacitor_range / inductor_range.
 
-### `availability.levers` - fact
+### `availability.too_small` - catalogue
+
+> C1 = 0.5 pF is below the 1 pF available on smd_pcb
+
+- **Applies when:** A resistor, capacitor or inductor is below its type's range on the spec's technology.
+- **Valid for:** Always: the technology profile's range for that part type.
+- **Why:** A response achieved with a part that does not exist is not a design.
+- **Source:** TechnologyProfile.resistor_range / capacitor_range / inductor_range.
+
+### `availability.levers.inductor_smaller` - fact
 
 > use a smaller inductor (raise the capacitance, or lower the impedance level) or a design without it
 
-- **Applies when:** After availability.too_large.
+- **Applies when:** After availability.too_large for an inductor.
 - **Valid for:** Always: L at a given frequency falls as C or the impedance level does.
 - **Why:** f0 = 1/(2*pi*sqrt(L*C)); impedance scaling moves L and R together.
 - **Source:** Circuit theory.
+
+### `availability.levers.inductor_larger` - fact
+
+> use a larger inductor (lower the capacitance, or raise the impedance level)
+
+- **Applies when:** After availability.too_small for an inductor.
+- **Valid for:** Always: L at a given frequency rises as C falls or the impedance level rises.
+- **Why:** f0 = 1/(2*pi*sqrt(L*C)); impedance scaling moves L and R together.
+- **Source:** Circuit theory.
+
+### `availability.levers.capacitor_smaller` - fact
+
+> use a smaller capacitor (raise the inductance or resistance it works with, or raise the impedance level)
+
+- **Applies when:** After availability.too_large for a capacitor.
+- **Valid for:** Always: at a fixed frequency C falls as the R or L it is paired with rises (f = 1/(2*pi*R*C), 1/(2*pi*sqrt(L*C))).
+- **Why:** Those products set the frequency; only the split between the parts is free.
+- **Source:** Circuit theory.
+
+### `availability.levers.capacitor_larger` - fact
+
+> use a larger capacitor (lower the inductance or resistance it works with, or lower the impedance level)
+
+- **Applies when:** After availability.too_small for a capacitor.
+- **Valid for:** Always: at a fixed frequency C rises as the R or L it is paired with falls.
+- **Why:** Those products set the frequency; only the split between the parts is free.
+- **Source:** Circuit theory.
+
+### `availability.levers.resistor_smaller` - fact
+
+> use a smaller resistor (lower the impedance level)
+
+- **Applies when:** After availability.too_large for a resistor.
+- **Valid for:** Always: scaling the impedance level down lowers every R.
+- **Why:** See availability.impedance_scaling.
+- **Source:** Circuit theory.
+
+### `availability.levers.resistor_larger` - fact
+
+> use a larger resistor (raise the impedance level)
+
+- **Applies when:** After availability.too_small for a resistor.
+- **Valid for:** Always: scaling the impedance level up raises every R.
+- **Why:** See availability.impedance_scaling.
+- **Source:** Circuit theory.
+
+### `availability.not_in_series` - catalogue
+
+> R1 = 1.59k is not an E24 value; nearest 1.5 kohm (-5.7%) and 1.6 kohm (+0.6%)
+
+- **Applies when:** The spec requires a value series for this part type (DesignSpec.value_series) and the part's value is not in it.
+- **Valid for:** Always: membership is a table lookup within 0.1 % of the value.
+- **Why:** A response achieved with a value nobody sells is not a design. The two neighbours are stated so the model knows its real choices; the harness never picks one or simulates it.
+- **Source:** IEC 60063 tables (models/series.py).
+
+### `availability.impedance_scaling` - fact
+
+> impedance scaling (every R and L times k, every C divided by k) leaves the transfer function unchanged - exactly for ideal R, L, C and op-amps, and only while the spec sets no source or load resistance, since those stay fixed
+
+- **Applies when:** After any availability violation, to explain 'impedance level'.
+- **Valid for:** Exact for ideal parts with no fixed terminations; parasitics and the spec's source/load resistances do not scale, so a real design moves.
+- **Why:** Every impedance in the network is multiplied by k, so all voltage ratios stay the same.
+- **Source:** Circuit theory (impedance scaling).
 
 
 ## loop

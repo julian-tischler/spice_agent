@@ -10,8 +10,10 @@ import math
 from spice_agent.agent.analysis import analysis_for
 from spice_agent.circuit import LOAD_ID, SOURCE_ID, SOURCE_NODE, VCC, VEE, get_profile
 from spice_agent.models import OPAMPS, SELECTABLE_OPAMPS
+from spice_agent.models.series import get_series
 from spice_agent.hints import render
 from spice_agent.simulation import DesignSpec
+from spice_agent.units import format_value
 
 
 # Topology reminders per filter type, assembled from the hint catalogue
@@ -54,10 +56,11 @@ ACTIVE_HINTS = {
 
 
 def _fmt_h(h: float) -> str:
-    for scale, unit in ((1.0, "H"), (1e-3, "mH"), (1e-6, "uH")):
-        if h >= scale:
-            return f"{h / scale:.3g} {unit}"
-    return f"{h / 1e-9:.3g} nH"
+    return format_value(h, "H")
+
+
+def _fmt_range(r: tuple[float, float], unit: str) -> str:
+    return f"{format_value(r[0], unit)} to {format_value(r[1], unit)}"
 
 
 def build_parts_note(spec: DesignSpec) -> str:
@@ -97,7 +100,7 @@ def build_tradeoff_note(spec: DesignSpec) -> str:
     if spec.filter_type == "bandpass" and spec.bandwidth_hz:
         q = spec.target_hz / spec.bandwidth_hz
         q_part = render("prompt.tradeoff.q_scaling", q=f"{q:g}", l_q=_fmt_h(l_1k * q))
-    limit = get_profile(spec.technology).max_practical_inductance
+    limit = get_profile(spec.technology).inductor_range[1]
     q_part += (render("prompt.tradeoff.inductor_any") if limit == float("inf") else
                render("prompt.tradeoff.inductor_limit", limit=_fmt_h(limit),
                       technology=spec.technology))
@@ -110,6 +113,21 @@ def build_tradeoff_note(spec: DesignSpec) -> str:
                 + render("prompt.tradeoff.opamp_gain"))
     bits.append(render("prompt.tradeoff.passive_no_power"))
     return "  TRADE-OFFS: " + "; ".join(bits) + ".\n"
+
+
+def build_series_note(spec: DesignSpec) -> str:
+    """The value series the spec requires, with every value of each - the
+    model cannot be expected to know E96 by heart. Types sharing a series
+    are listed together, so the table appears once."""
+    if not spec.value_series:
+        return ""
+    by_series: dict[str, list[str]] = {}
+    for kind, series in spec.value_series.items():
+        by_series.setdefault(series, []).append(kind + "s")
+    lines = [render("prompt.series.line", types=" and ".join(kinds), series=series,
+                    values=", ".join(f"{m:g}" for m in get_series(series)))
+             for series, kinds in by_series.items()]
+    return "- " + render("prompt.series.required", lines="; ".join(lines)) + "\n"
 
 
 def build_hints(spec: DesignSpec) -> str:
@@ -139,10 +157,12 @@ def build_technology_note(spec: DesignSpec) -> str:
         f"  Components are therefore NOT ideal, and the simulation includes "
         f"these parasitics. " + render("prompt.technology.srf") + " "
         + render("prompt.technology.smaller_inductors", capital=True)
-        + ("" if profile.max_practical_inductance == float("inf") else
-           render("prompt.technology.inductor_limit",
-                  limit=_fmt_h(profile.max_practical_inductance),
-                  technology=profile.name))
+        + ("" if not profile.has_value_limits else
+           render("prompt.technology.value_ranges", technology=profile.name,
+                  r=_fmt_range(profile.resistor_range, "ohm"),
+                  c=_fmt_range(profile.capacitor_range, "F"),
+                  dielectric=profile.capacitor_dielectric,
+                  l=_fmt_range(profile.inductor_range, "H")))
     )
 
 
@@ -167,7 +187,8 @@ the target frequency must land well inside that range.
 - Judged from {spec.judge_window()[0]:g} Hz to {spec.judge_window()[1]:g} Hz: \
 every requirement is checked inside that range; the response outside it is \
 reported to you but cannot fail the design.
-{build_termination_note(spec)}{build_parts_note(spec)}{build_technology_note(spec)}
+{build_termination_note(spec)}{build_parts_note(spec)}{build_series_note(spec)}\
+{build_technology_note(spec)}
 {build_hints(spec)}
 
 Call the simulate_circuit tool with your proposed component values. You'll \

@@ -27,6 +27,19 @@ _SUFFIXES: tuple[tuple[str, float], ...] = (
 _NUMBER = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*([a-zA-Z]*)\s*$")
 
 
+_PREFIXES = ((1e6, "M"), (1e3, "k"), (1.0, ""), (1e-3, "m"), (1e-6, "u"),
+             (1e-9, "n"), (1e-12, "p"))
+
+
+def format_value(value: float, unit: str) -> str:
+    """Engineering notation for feedback text: format_value(0.022, 'H') ->
+    '22 mH', format_value(1e7, 'ohm') -> '10 Mohm'. Three significant figures."""
+    for scale, prefix in _PREFIXES:
+        if abs(value) >= scale:
+            return f"{value / scale:.3g} {prefix}{unit}"
+    return f"{value / 1e-15:.3g} f{unit}"
+
+
 def parse_spice_value(text: str | float | int) -> float:
     """
     '23.87m' -> 0.02387, '100n' -> 1e-07, '1Meg' -> 1000000.0, '1k5' is

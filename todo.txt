@@ -21,7 +21,7 @@ STATE
   * ARCHITECTURE.md rule: "feedback and hints convey hard facts only"
   * hint catalogue: src/spice_agent/hints.py (91 hints, documented),
     generated HINTS.md (python -m spice_agent.hints), tests/test_hints.py
-- Tests: 732 offline pass (python -m pytest -m "not live"); 15 LTspice pass
+- Tests: 858 offline pass (python -m pytest -m "not live"); 15 LTspice pass
   (LTspice was updated by the user and works again).
 - Live runs: Claude backend via winget CLI:
   CLAUDE_BIN="$LOCALAPPDATA/Microsoft/WinGet/Links/claude.exe"
@@ -36,12 +36,29 @@ NEXT (in rough order)
        exports; notch depth was grid-limited (ideal zero read 31.5 dB) so the
        diagnosis blamed the design instead of L1's losses -> refine_notch in
        pipeline.py (one 5001-point linear pass around the minimum).
-[ ] 3. Light passive catalogue (agreed earlier as step 2 of the "catalogue"
-       discussion): standard value series (--series E12/E24/E96, off by
-       default) checked by the validator with feedback ("2.25n is not E24;
-       nearest 2.2n / 2.4n"); availability limits for C/R as well as L.
-       Rationale: rounding to standard values has no closed form -> real
-       simulation-in-the-loop value.
+[~] 3. Light passive catalogue. DONE (2026-11-23, uncommitted): E6-E96
+       tables (models/series.py), R/C/L value ranges per technology (always
+       on), --series (opt-in, binds on every technology), both enforced in
+       simulation/availability.py as NOT BUILDABLE with the neighbours named.
+       Live eval (2026-11-23, 3 runs each, haiku, ideal technology):
+         LP 10 kHz +/-2 %, 50/50 ohm, 50 dB at 100 kHz: free 1/1/1 iterations,
+           E12 3/2/3 - rounding the textbook 318n/1.59m/318n to E12 lands at
+           +2.6 %; the model then found asymmetric 390n/330n. ~8x the cost.
+         BP 50 kHz, 5 kHz, +/-2 %: free 1/3/1, E12 1/1/1 (1.5m/6.8n/47 is a
+           lucky E12 combination) - series does not make every spec harder.
+         The model never submitted an off-series value (the prompt table
+           works), so the series feedback itself never fired live.
+         One run combined parts: 330n || 22n (C1b, C2b) to reach 352n. Watch;
+           --max-parts if it becomes the habit.
+       FIXED: bandpass centre was read off the 100/dec grid (every BP run
+       reported 49692 Hz; true f0 49.6-50.3 kHz, +/-1.2 % quantisation).
+       refine_extremum now refines a bandpass peak like a notch minimum.
+       The -3 dB edges are refined too (one sweep spans peak + both edges);
+       a series RLC now measures to 0.01 Hz.
+       OPEN DECISION: -3 dB is taken as exactly 3.000 dB, so bandwidths and
+       cutoffs sit 0.24 % below the half-power (3.0103 dB) values the
+       textbook formulas (R/(2*pi*L), 1/(2*pi*R*C)) give. Switch to
+       10*log10(2)?
 [ ] 4. Wider op-amp grade set (~7 grades spanning real trade-offs: speed vs
        power, supply range, bias current, rail-to-rail) - only meaningful now
        that a supply-current budget exists. Keep generic, self-written models.

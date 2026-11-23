@@ -194,10 +194,36 @@ python -m spice_agent.agent --type bandpass --target 10000 --bandwidth 2000 \
   earlier, one-sided prompt the model used an op-amp first in all nine powered
   live runs, whatever the requirements said. `--passive-only` keeps rails in
   the spec but forbids op-amps.
-- **What exists is enforced.** Inductors larger than the technology offers
-  (10 mH on `smd_pcb`, 100 mH on `breadboard`, unlimited on `ideal`) fail the
-  design as `NOT BUILDABLE`. The design is still simulated, so the model sees
-  its response, and the diagnosis files it as a design problem.
+- **What exists is enforced.** Every resistor, capacitor and inductor must lie
+  in the range the technology offers, or the design fails as `NOT BUILDABLE`.
+  The design is still simulated, so the model sees its response, and the
+  diagnosis files it as a design problem. The prompt states the ranges up
+  front. Capacitors are limited to stable dielectrics (C0G and film), since the
+  voltage and temperature drift of X7R or electrolytic parts is not simulated:
+
+  | | `smd_pcb` | `breadboard` | `ideal` |
+  |---|---|---|---|
+  | R | 1 Ω – 10 MΩ | 1 Ω – 10 MΩ | any |
+  | C | 1 pF – 100 nF (C0G) | 1 pF – 10 µF (C0G or film) | any |
+  | L | 1 nH – 10 mH | 1 µH – 100 mH | any |
+
+  These are representative catalogue figures, with the same caveat as the
+  parasitic values. A failure names the limit and what moves the part back
+  into range (for example "use a smaller capacitor (raise the inductance or
+  resistance it works with, or raise the impedance level)"), plus when
+  impedance scaling is exact.
+- **Standard values, if the spec asks for them** (`--series`, off by default).
+  `--series E24` makes every resistor, capacitor and inductor an E24 value;
+  `--series R=E96,C=E12` sets one per type, and an unlisted type is
+  unrestricted. The prompt lists every allowed value, and the check applies on
+  every technology, ideal included, because which values exist does not
+  depend on how ideal the parts are. An off-series value fails as
+  `NOT BUILDABLE` with its two neighbours: "R1 = 1.59k is not an E24 value;
+  nearest 1.5 kohm (-5.7%) and 1.6 kohm (+0.6%)". That is a table lookup
+  (`models/series.py`, IEC 60063); the harness never picks a neighbour or
+  simulates one. The point is that rounding a textbook design to standard
+  values has no closed-form answer, so meeting a tight spec with them needs
+  the simulation loop.
 - **A supply-current budget** (`--max-supply-current`, per rail) is measured
   from the operating point. On ideal technology, where op-amps are simulated
   ideal and draw nothing, each grade's catalogue current is charged instead.
@@ -345,6 +371,7 @@ What is judged, and around what:
 | `--gain DB` / `--gain-tol DB` | not checked / `1` | absolute passband-gain target |
 | `--max-supply-current A` | no budget | max current per rail, e.g. `1m` |
 | `--passive-only` | off | no op-amps, even with rails |
+| `--series SERIES` | any value | standard values (E6–E96): `E24` for all, `R=E96,C=E12` per type, `E12,R=E96` both |
 | `--diagnosis full\|basic\|off` | `full` | parasitics diagnosis of failed non-ideal designs |
 
 `--max-iterations` caps the budget (default 6 for Gemini, 5 for Claude) and
@@ -408,7 +435,11 @@ re-simulated. Curves go from light (first attempt) to dark (latest). The
 grey zones are the target cutoff band and the stopband region the response
 must stay out of. The table underneath lists each component position per
 iteration, with identical parallel parts collapsed (`20x 30n`), and what each
-iteration measured. The region outside the judged window is greyed out and
+iteration measured. When an iteration failed, a "failed on" row names each
+failed requirement with its measured value and limit, such as "cutoff +2.6%
+(limit ±2%)". That matters when the failure is invisible at plot scale: two
+cutoffs 3 % apart are one pixel apart on a six-decade axis. The region
+outside the judged window is greyed out and
 the peaking limit drawn as a dashed line. To redraw it for any existing run:
 
 ```bash
@@ -579,12 +610,12 @@ open is what was simulated — parasitics and all. On the breadboard profile a
 ## Testing
 
 ```bash
-python -m pytest -m "not live"   # 732 tests, needs only ngspice  (~100 s)
+python -m pytest -m "not live"   # 858 tests, needs only ngspice  (~145 s)
 python -m pytest -m ltspice      #  15 tests, drives LTspice.exe
 python -m pytest -m live         #   5 tests, calls Gemini; needs an API key
 ```
 
-737 total (the 15 LTspice tests are part of the "not live" set). The Claude
+863 total (the 15 LTspice tests are part of the "not live" set). The Claude
 backend is tested against a scripted runner, so no test calls `claude`. The LTspice and live tests skip themselves when the binary or the
 key is missing, so `python -m pytest` works on a bare checkout.
 
@@ -635,6 +666,19 @@ verdict's, each diagnosis variant's and the plot's) gets one extra dense
 linear sweep between the samples either side of its minimum. An ideal zero
 now reads about 100 dB, and a lossy notch reads its true depth.
 
+A band-pass centre had it too: it was the nearest grid point, ±1.2 % at 100
+points per decade, against tolerances of a few percent. Every band-pass run of
+one live evaluation reported 49692 Hz whatever its values (true centres 49.6
+to 50.3 kHz), and the −3 dB level, taken from that coarse peak, put one
+design's bandwidth at +4.4 % instead of +0.6 %. A band-pass spec now gets the
+dense sweep from just below its lower −3 dB edge to just above its upper one,
+which holds the peak too. A series RLC now reports exactly 1/(2π√(LC)), and
+its edges are no longer interpolated across a 2.3 % grid step.
+
+The band edges are taken at exactly 3.000 dB below the peak, so the bandwidth
+is 0.24 % narrower than the half-power (3.01 dB) bandwidth R/(2πL) that the
+textbook formula gives. The same convention applies to every −3 dB cutoff.
+
 **Parasitic values are representative, not measured.** This is the biggest
 caveat. Inductor winding capacitance (3 pF SMD / 15 pF breadboard) and Q at
 self-resonance (20 / 10) are plausible mid-range figures, not measurements, and
@@ -651,10 +695,10 @@ typical geometry. A tight layout beats them; a sloppy one is worse.
 lead inductance, since modelling them would mean per-component local grounds
 and so ground bounce — finer-grained than the rest of the model justifies.
 
-**Only inductor size is checked for availability.** Inductors are limited
-per technology. Capacitor and resistor ranges are not, and neither are
-standard value series (E12/E24), which is the next step (a light passive
-catalogue).
+**Values can be combined.** Each part is checked on its own, so two E24
+resistors in series reach almost any value and quietly undo `--series`. The
+feedback does not suggest it, and there is no part-count limit yet; a
+`--max-parts` limit is the fix if live runs show the model doing it.
 
 **Parasitic attribution is per group, not per pair.** Each group is measured
 on its own and by removal, and ranked by the larger effect. That catches both

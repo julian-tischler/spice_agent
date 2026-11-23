@@ -317,9 +317,9 @@ _h("prompt.tradeoff.q_scaling", FACT,
 _h("prompt.tradeoff.inductor_limit", CATALOGUE,
    "; inductors are available only up to {limit} on {technology} (enforced)",
    applies_when="Inside prompt.tradeoff.inductor_size on a real technology.",
-   valid_for="Always: the technology profile's max_practical_inductance.",
+   valid_for="Always: the technology profile's inductor_range.",
    why="Larger parts do not exist in that construction; the check is enforced.",
-   source="TechnologyProfile.max_practical_inductance.",
+   source="TechnologyProfile.inductor_range.",
    example={"limit": "10 mH", "technology": "smd_pcb"})
 
 _h("prompt.tradeoff.inductor_any", CATALOGUE,
@@ -381,14 +381,38 @@ _h("prompt.technology.smaller_inductors", RULE_OF_THUMB,
    why="SRF = 1/(2*pi*sqrt(L*Cw)) rises as L falls (Cw roughly constant per family).",
    source="Inductor application notes.")
 
-_h("prompt.technology.inductor_limit", CATALOGUE,
-   " Inductors above {limit} are not available as {technology} parts; a design that "
-   "needs one fails.",
-   applies_when="Construction note on a technology with an inductance limit.",
-   valid_for="Always: TechnologyProfile.max_practical_inductance.",
-   why="Enforced by simulation/availability.py.",
-   source="TechnologyProfile.",
-   example={"limit": "10 mH", "technology": "smd_pcb"})
+_h("prompt.technology.value_ranges", CATALOGUE,
+   " Parts available as {technology}: resistors {r}, capacitors {c} ({dielectric}), "
+   "inductors {l}; a design that needs a value outside these fails.",
+   applies_when="Construction note on a technology with value limits (every real one).",
+   valid_for="Always: TechnologyProfile.resistor_range / capacitor_range / "
+             "inductor_range.",
+   why="Enforced by simulation/availability.py, so the model should know the ranges "
+       "before it designs, not learn them from a failure.",
+   source="TechnologyProfile (representative catalogue figures; capacitors limited to "
+          "stable dielectrics, whose value does not move with voltage or temperature).",
+   example={"technology": "smd_pcb", "r": "1 ohm to 10 Mohm", "c": "1 pF to 100 nF",
+            "dielectric": "C0G/NP0 ceramic", "l": "1 nH to 10 mH"})
+
+_h("prompt.series.required", CATALOGUE,
+   "STANDARD VALUES (required, checked): {lines}. A value of any listed part type "
+   "outside its series fails the design; types not listed may take any value.",
+   applies_when="The spec sets value_series (--series).",
+   valid_for="Always: enforced by simulation/availability.py on every technology.",
+   why="The model must know the allowed values before it designs, not learn them "
+       "from a failure.",
+   source="DesignSpec.value_series and the IEC 60063 tables.",
+   example={"lines": "resistors from E12: 1, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, "
+                     "5.6, 6.8, 8.2 (times any power of ten)"})
+
+_h("prompt.series.line", CATALOGUE,
+   "{types} from {series}: {values} (times any power of ten)",
+   applies_when="Inside prompt.series.required, once per series.",
+   valid_for="Always: the series' published values.",
+   why="States every allowed mantissa; E48 and E96 are not something to recall.",
+   source="IEC 60063 (models/series.py).",
+   example={"types": "resistors", "series": "E12",
+            "values": "1, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2"})
 
 _h("prompt.realistic_values", RULE_OF_THUMB,
    "keep component values realistic (resistors in ohms to megaohms, capacitors in pF "
@@ -891,19 +915,93 @@ _h("budget.levers", FACT,
 
 _h("availability.too_large", CATALOGUE,
    "{id} = {value} exceeds the {limit} available on {technology}",
-   applies_when="An inductor exceeds the technology's max_practical_inductance.",
-   valid_for="Always: the technology profile's limit.",
+   applies_when="A resistor, capacitor or inductor is above its type's range on the "
+                "spec's technology.",
+   valid_for="Always: the technology profile's range for that part type.",
    why="A response achieved with a part that does not exist is not a design.",
-   source="TechnologyProfile.max_practical_inductance.",
+   source="TechnologyProfile.resistor_range / capacitor_range / inductor_range.",
    example={"id": "L1", "value": "22 mH", "limit": "10 mH", "technology": "smd_pcb"})
 
-_h("availability.levers", FACT,
+_h("availability.too_small", CATALOGUE,
+   "{id} = {value} is below the {limit} available on {technology}",
+   applies_when="A resistor, capacitor or inductor is below its type's range on the "
+                "spec's technology.",
+   valid_for="Always: the technology profile's range for that part type.",
+   why="A response achieved with a part that does not exist is not a design.",
+   source="TechnologyProfile.resistor_range / capacitor_range / inductor_range.",
+   example={"id": "C1", "value": "0.5 pF", "limit": "1 pF", "technology": "smd_pcb"})
+
+_h("availability.levers.inductor_smaller", FACT,
    "use a smaller inductor (raise the capacitance, or lower the impedance level) or a "
    "design without it",
-   applies_when="After availability.too_large.",
+   applies_when="After availability.too_large for an inductor.",
    valid_for="Always: L at a given frequency falls as C or the impedance level does.",
    why="f0 = 1/(2*pi*sqrt(L*C)); impedance scaling moves L and R together.",
    source="Circuit theory.")
+
+_h("availability.levers.inductor_larger", FACT,
+   "use a larger inductor (lower the capacitance, or raise the impedance level)",
+   applies_when="After availability.too_small for an inductor.",
+   valid_for="Always: L at a given frequency rises as C falls or the impedance level "
+             "rises.",
+   why="f0 = 1/(2*pi*sqrt(L*C)); impedance scaling moves L and R together.",
+   source="Circuit theory.")
+
+_h("availability.levers.capacitor_smaller", FACT,
+   "use a smaller capacitor (raise the inductance or resistance it works with, or "
+   "raise the impedance level)",
+   applies_when="After availability.too_large for a capacitor.",
+   valid_for="Always: at a fixed frequency C falls as the R or L it is paired with "
+             "rises (f = 1/(2*pi*R*C), 1/(2*pi*sqrt(L*C))).",
+   why="Those products set the frequency; only the split between the parts is free.",
+   source="Circuit theory.")
+
+_h("availability.levers.capacitor_larger", FACT,
+   "use a larger capacitor (lower the inductance or resistance it works with, or "
+   "lower the impedance level)",
+   applies_when="After availability.too_small for a capacitor.",
+   valid_for="Always: at a fixed frequency C rises as the R or L it is paired with "
+             "falls.",
+   why="Those products set the frequency; only the split between the parts is free.",
+   source="Circuit theory.")
+
+_h("availability.levers.resistor_smaller", FACT,
+   "use a smaller resistor (lower the impedance level)",
+   applies_when="After availability.too_large for a resistor.",
+   valid_for="Always: scaling the impedance level down lowers every R.",
+   why="See availability.impedance_scaling.",
+   source="Circuit theory.")
+
+_h("availability.levers.resistor_larger", FACT,
+   "use a larger resistor (raise the impedance level)",
+   applies_when="After availability.too_small for a resistor.",
+   valid_for="Always: scaling the impedance level up raises every R.",
+   why="See availability.impedance_scaling.",
+   source="Circuit theory.")
+
+_h("availability.not_in_series", CATALOGUE,
+   "{id} = {value} is not an {series} value; nearest {below} ({below_pct}) and "
+   "{above} ({above_pct})",
+   applies_when="The spec requires a value series for this part type "
+                "(DesignSpec.value_series) and the part's value is not in it.",
+   valid_for="Always: membership is a table lookup within 0.1 % of the value.",
+   why="A response achieved with a value nobody sells is not a design. The two "
+       "neighbours are stated so the model knows its real choices; the harness never "
+       "picks one or simulates it.",
+   source="IEC 60063 tables (models/series.py).",
+   example={"id": "R1", "value": "1.59k", "series": "E24", "below": "1.5 kohm",
+            "below_pct": "-5.7%", "above": "1.6 kohm", "above_pct": "+0.6%"})
+
+_h("availability.impedance_scaling", FACT,
+   "impedance scaling (every R and L times k, every C divided by k) leaves the "
+   "transfer function unchanged - exactly for ideal R, L, C and op-amps, and only "
+   "while the spec sets no source or load resistance, since those stay fixed",
+   applies_when="After any availability violation, to explain 'impedance level'.",
+   valid_for="Exact for ideal parts with no fixed terminations; parasitics and the "
+             "spec's source/load resistances do not scale, so a real design moves.",
+   why="Every impedance in the network is multiplied by k, so all voltage ratios stay "
+       "the same.",
+   source="Circuit theory (impedance scaling).")
 
 # =====================================================================
 # Loop (agent/loop.py)

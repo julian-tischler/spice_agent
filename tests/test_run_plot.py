@@ -82,3 +82,62 @@ def test_component_absent_in_an_iteration_shows_a_dash():
     b = {"components": [{"id": "L1", "type": "inductor", "nodes": ["in", "n1"], "value": "1m"}]}
     labels, cells = component_table([{"circuit": a}, {"circuit": b}])
     assert cells == [["50", "-"], ["-", "1m"]]
+
+
+# ---------------------------------------------------------------------
+# Why an iteration failed: the "failed on" row
+# ---------------------------------------------------------------------
+
+def _verdict(circuit, spec):
+    from spice_agent.agent.analysis import analysis_for
+    from spice_agent.simulation import simulate_and_verify
+
+    return simulate_and_verify(dict(circuit, analysis=analysis_for(spec)), spec)
+
+
+def test_fail_reason_states_the_value_and_its_limit():
+    """The live E12 run of 2026-11-23: its two Bode curves are a pixel apart,
+    the reason (+2.6 % against +/-2 %) is only in the numbers."""
+    from spice_agent.run_plot import fail_reasons
+    from spice_agent.simulation import DesignSpec
+
+    spec = DesignSpec("lowpass", 1000, tolerance_pct=2)
+    r = _verdict(RC_LOWPASS, spec)                     # 1.59 kHz: +59 %
+    assert fail_reasons(r, spec) == [f"cutoff {r['error_pct']:+.1f}% (limit ±2%)"]
+    assert fail_reasons(_verdict(RC_LOWPASS, DesignSpec("lowpass", 1590)), spec) == []
+
+
+def test_every_failed_requirement_is_listed_in_priority_order():
+    from spice_agent.run_plot import fail_reasons
+    from spice_agent.simulation import DesignSpec
+
+    spec = DesignSpec("lowpass", 1000, stopband_hz=1e4, stopband_atten_db=40,
+                      technology="smd_pcb", value_series={"R": "E12"})
+    r = _verdict(BAD, spec)                            # 10k / 100n: 159 Hz, 1st order
+    reasons = fail_reasons(r, spec)
+    assert reasons[0] == "stopband " + f"{r['stopband_atten_db']:.1f} dB (need 40 dB)"
+    assert reasons[1].startswith("cutoff -84.1% (limit")
+
+
+def test_off_range_and_off_series_parts_are_named():
+    from spice_agent.run_plot import fail_reasons
+    from spice_agent.simulation import DesignSpec
+
+    spec = DesignSpec("lowpass", 159, technology="smd_pcb", value_series={"R": "E6"})
+    r = _verdict(BAD, spec)                            # R1 = 10k is E6; C1 100n is in range
+    assert fail_reasons(r, spec) == []
+    spec = DesignSpec("lowpass", 133, technology="smd_pcb", value_series={"C": "E6"})
+    big = {"title": "t", "components": BAD["components"][:2] + [
+        {"id": "C1", "type": "capacitor", "nodes": ["out", "0"], "value": "120n"}]}  # 133 Hz
+    assert fail_reasons(_verdict(big, spec), spec) == ["not buildable: C1 too large, C1 not E6"]
+
+
+def test_failed_on_row_appears_only_when_something_failed(run_dir):
+    from spice_agent.run_plot import metric_rows
+
+    run = load_run(run_dir)
+    labels, cells = metric_rows(run["spec"], run["iterations"])
+    assert labels[-1] == "failed on"
+    assert cells[-1][0].startswith("cutoff ") and cells[-1][1] == "-"
+    labels, _ = metric_rows(run["spec"], run["iterations"][1:])
+    assert "failed on" not in labels

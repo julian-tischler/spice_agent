@@ -127,7 +127,8 @@ def test_smd_ladder_meets_the_response_but_is_not_buildable():
 
 
 def test_passing_design_has_no_diagnosis():
-    s = DesignSpec("lowpass", 10_000, technology="smd_pcb", load_ohm=50)
+    # breadboard: the 225 nF is above the 100 nF C0G limit on smd_pcb
+    s = DesignSpec("lowpass", 10_000, technology="breadboard", load_ohm=50)
     lc = {"title": "L-C into 50 ohm", "components": [
         V1, {"id": "L1", "type": "inductor", "nodes": ["in", "out"], "value": "1.125m"},
         {"id": "C1", "type": "capacitor", "nodes": ["out", "0"], "value": "225n"}]}

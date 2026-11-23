@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from typing import Literal
 
 from spice_agent.circuit.parasitics import get_profile
+from spice_agent.models.series import get_series
 
 
 FilterType = Literal["lowpass", "highpass", "bandpass", "notch"]
@@ -28,6 +29,44 @@ JUDGE_DECADES = 2
 # Loose on purpose: catches undamped resonances (+12 dB was seen live)
 # while still allowing deliberate Chebyshev-style ripple.
 DEFAULT_MAX_PEAKING_DB = 3.0
+
+# The passive part types a value series can be required for, and the names
+# a user may give them (CLI "R=E96", or a dict key).
+PASSIVE_TYPES = ("resistor", "capacitor", "inductor")
+_TYPE_NAMES = {alias: t for t, letter in zip(PASSIVE_TYPES, "rcl")
+               for alias in (t, t + "s", letter)}
+
+
+def _part_type(name: str) -> str:
+    key = str(name).strip().lower()
+    if key not in _TYPE_NAMES:
+        raise ValueError(f"Unknown part type {name!r} for a value series; use "
+                         f"R / C / L (or resistor / capacitor / inductor)")
+    return _TYPE_NAMES[key]
+
+
+def parse_value_series(text: str) -> dict[str, str]:
+    """
+    The --series argument as a value_series dict.
+
+        "E24"           every resistor, capacitor and inductor from E24
+        "R=E96,C=E12"   resistors E96, capacitors E12, inductors unrestricted
+        "E12,R=E96"     E12 for all, except resistors from E96
+    """
+    out: dict[str, str] = {}
+    overrides: dict[str, str] = {}
+    for token in (t.strip() for t in str(text).split(",")):
+        if not token:
+            continue
+        if "=" in token:
+            kind, name = token.split("=", 1)
+            overrides[_part_type(kind)] = name.strip()
+        else:
+            out.update({t: token for t in PASSIVE_TYPES})
+    out.update(overrides)
+    if not out:
+        raise ValueError(f"No value series in {text!r}")
+    return out
 
 
 @dataclass
@@ -106,6 +145,13 @@ class DesignSpec:
     # False = passive parts only even though rails exist ("the board has
     # +/-12 V, but I want a passive filter").
     allow_active: bool = True
+    # Standard values the passive parts must come from: {part type: series},
+    # e.g. {"resistor": "E96", "capacitor": "E12"} (see models/series.py).
+    # A type left out is unrestricted; None (the default) restricts nothing.
+    # A catalogue property of the parts, so it binds on every technology,
+    # ideal included. Normalised in __post_init__ to full type names and
+    # upper-case series names.
+    value_series: dict[str, str] | None = None
 
     def __post_init__(self):
         if self.filter_type not in ("lowpass", "highpass", "bandpass", "notch"):
@@ -201,6 +247,17 @@ class DesignSpec:
             if not self.powered:
                 raise ValueError("max_supply_current_a needs supply rails "
                                  "(supply_pos_v / supply_neg_v)")
+        if self.value_series is not None:
+            normalised = {}
+            for kind, name in dict(self.value_series).items():
+                get_series(name)                        # raises on an unknown series
+                normalised[_part_type(kind)] = str(name).strip().upper()
+            self.value_series = {t: normalised[t] for t in PASSIVE_TYPES
+                                 if t in normalised} or None
+
+    def series_for(self, component_type: str) -> str | None:
+        """The value series a part type must use, or None if unrestricted."""
+        return (self.value_series or {}).get(component_type)
 
     @property
     def powered(self) -> bool:
@@ -310,6 +367,9 @@ class DesignSpec:
                              f"supply rail")
             if not self.allow_active:
                 parts.append("passive parts only")
+        if self.value_series:
+            parts.append("standard values only: " + ", ".join(
+                f"{t}s {s}" for t, s in self.value_series.items()))
         return "; ".join(parts)
 
     def to_dict(self) -> dict:

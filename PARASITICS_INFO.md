@@ -52,7 +52,9 @@ with inductance.
 | `interconnect_node_c` | 0.3 pF | 2 pF | LOW |
 | `contact_resistance` | 0 (soldered) | 30 mΩ | LOW |
 | `io_coupling_c` | 0.02 pF | 2 pF | LOW |
-| `max_practical_inductance` | 10 mH | ∞ | advisory, unenforced |
+| `resistor_range` | 1 Ω – 10 MΩ | 1 Ω – 10 MΩ | HIGH (enforced: `NOT BUILDABLE`) |
+| `capacitor_range` | 1 pF – 100 nF (C0G) | 1 pF – 10 µF (C0G or film) | MEDIUM (enforced) |
+| `inductor_range` | 1 nH – 10 mH | 1 µH – 100 mH | MEDIUM (enforced) |
 
 **Where the high-confidence ones come from.** 0.5–0.9 nH of ESL for an 0603
 MLCC is a standard figure in vendor application notes. Roughly 1 nH per mm for
